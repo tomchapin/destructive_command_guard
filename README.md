@@ -1,8 +1,6 @@
-# git_safety_guard
+# dcg (Destructive Command Guard)
 
 A high-performance Claude Code hook that blocks destructive commands before they execute, protecting your work from accidental deletion by AI coding agents.
-
-> **Note on the name:** Despite the name, this tool protects against more than git commands. It blocks destructive git commands, dangerous filesystem operations (`rm -rf`), and is designed to extend to database operations, container commands, and other irreversible actions. A more accurate name would be **"destructive command guard"**, but the git-centric name has stuck.
 
 ## Origins & Authors
 
@@ -56,58 +54,62 @@ This hook intercepts dangerous commands *before* execution and blocks them with 
 - `git clean -n` / `git clean --dry-run` - preview mode
 - `rm -rf /tmp/*`, `rm -rf /var/tmp/*`, `rm -rf $TMPDIR/*` - temp directory cleanup
 
-## Planned Expansion (Future Scope)
+## Modular Pack System
 
-The name `git_safety_guard` is a historical artifact. The tool is designed to expand beyond git to protect against all classes of destructive operations that AI agents might accidentally execute. Planned additions include:
+dcg uses a modular "pack" system to organize destructive command patterns by category. Packs can be enabled or disabled in the configuration file. Available packs include:
 
-### Database Operations (High Priority)
+### Core Packs (Always Enabled)
+- **core.git** - Blocks destructive git commands (reset --hard, checkout --, push --force, etc.)
+- **core.filesystem** - Blocks dangerous rm -rf outside temp directories
 
-| Command Pattern | Risk | Status |
-|-----------------|------|--------|
-| `DROP TABLE`, `DROP DATABASE` | Destroys schema and data | Planned |
-| `TRUNCATE TABLE` | Deletes all data instantly | Planned |
-| `DELETE FROM` without `WHERE` | Mass data deletion | Planned |
-| `mysql -e "DROP..."` | CLI-based destruction | Planned |
-| `psql -c "DROP..."` | PostgreSQL destruction | Planned |
-| `redis-cli FLUSHALL` | Wipes entire Redis | Planned |
-| `mongosh "db.dropDatabase()"` | MongoDB destruction | Planned |
+### Database Packs
+- **database.postgresql** - Blocks DROP/TRUNCATE in PostgreSQL
+- **database.mysql** - Blocks DROP/TRUNCATE in MySQL/MariaDB
+- **database.mongodb** - Blocks dropDatabase, drop() in MongoDB
+- **database.redis** - Blocks FLUSHALL/FLUSHDB commands
+- **database.sqlite** - Blocks DROP in SQLite
 
-### Container & Infrastructure (Medium Priority)
+### Container Packs
+- **containers.docker** - Blocks docker system prune, docker rm -f, etc.
+- **containers.compose** - Blocks docker-compose down --volumes
+- **containers.podman** - Blocks podman system prune, etc.
 
-| Command Pattern | Risk | Status |
-|-----------------|------|--------|
-| `docker system prune -af` | Removes all containers, images, volumes | Planned |
-| `docker rm -f` | Force-removes running containers | Planned |
-| `docker volume rm` | Deletes persistent data | Planned |
-| `kubectl delete namespace` | Destroys entire namespace | Planned |
-| `kubectl delete all --all` | Mass resource deletion | Planned |
+### Kubernetes Packs
+- **kubernetes.kubectl** - Blocks kubectl delete namespace, etc.
+- **kubernetes.helm** - Blocks helm uninstall, etc.
+- **kubernetes.kustomize** - Blocks kustomize delete patterns
 
-### Additional Git Operations (Medium Priority)
+### Cloud Provider Packs
+- **cloud.aws** - Blocks destructive AWS CLI commands
+- **cloud.gcp** - Blocks destructive gcloud commands
+- **cloud.azure** - Blocks destructive az commands
 
-| Command Pattern | Risk | Status |
-|-----------------|------|--------|
-| `git gc --prune=now` | Can lose unreachable commits | Planned |
-| `git reflog expire --expire=now` | Destroys reflog safety net | Planned |
-| `git filter-branch` | Rewrites entire history | Planned |
+### Infrastructure Packs
+- **infrastructure.terraform** - Blocks terraform destroy
+- **infrastructure.ansible** - Blocks dangerous ansible patterns
+- **infrastructure.pulumi** - Blocks pulumi destroy
 
-### File Operations (Medium Priority)
+### System Packs
+- **system.disk** - Blocks dd, mkfs, fdisk operations
+- **system.permissions** - Blocks dangerous chmod/chown patterns
+- **system.services** - Blocks systemctl stop/disable patterns
 
-| Command Pattern | Risk | Status |
-|-----------------|------|--------|
-| `mv` overwriting files outside temp | Silent data loss | Planned |
-| `> file` (redirect truncation) | Overwrites file contents | Planned |
-| `truncate -s 0` | Empties file contents | Planned |
+### Other Packs
+- **strict_git** - Extra paranoid git protections
+- **package_managers** - Blocks npm unpublish, cargo yank, etc.
 
-### Low-Level Operations (Lower Priority)
+Enable packs in `~/.config/dcg/config.toml`:
 
-| Command Pattern | Risk | Status |
-|-----------------|------|--------|
-| `dd of=/dev/...` | Disk destruction | Planned |
-| `mkfs`, `mkfs.ext4` | Filesystem destruction | Planned |
-| `fdisk`, `parted` | Partition table modification | Planned |
-| `chmod 777` on sensitive paths | Security degradation | Planned |
+```toml
+[packs]
+enabled = [
+    "database.postgresql",
+    "containers.docker",
+    "kubernetes",  # Enables all kubernetes sub-packs
+]
+```
 
-If you encounter commands that should be blocked, please file an issue describing the scenario.
+If you encounter commands that should be blocked, please file an issue.
 
 ## Installation
 
@@ -117,26 +119,26 @@ The easiest way to install is using the install script, which downloads a prebui
 
 ```bash
 # With cache buster (recommended - ensures latest version)
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/git_safety_guard/master/install.sh?$(date +%s)" | bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/dcg/master/install.sh?$(date +%s)" | bash
 
 # Without cache buster
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/git_safety_guard/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/dcg/master/install.sh | bash
 ```
 
 **With options:**
 
 ```bash
 # Easy mode: auto-update PATH in shell rc files
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/git_safety_guard/master/install.sh?$(date +%s)" | bash -s -- --easy-mode
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/dcg/master/install.sh?$(date +%s)" | bash -s -- --easy-mode
 
 # Install specific version
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/git_safety_guard/master/install.sh?$(date +%s)" | bash -s -- --version v0.1.0
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/dcg/master/install.sh?$(date +%s)" | bash -s -- --version v0.1.0
 
 # Install to /usr/local/bin (system-wide, requires sudo)
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/git_safety_guard/master/install.sh?$(date +%s)" | sudo bash -s -- --system
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/dcg/master/install.sh?$(date +%s)" | sudo bash -s -- --system
 
 # Build from source instead of downloading binary
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/git_safety_guard/master/install.sh?$(date +%s)" | bash -s -- --from-source
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/dcg/master/install.sh?$(date +%s)" | bash -s -- --from-source
 ```
 
 > **Note:** If you have [gum](https://github.com/charmbracelet/gum) installed, the installer will use it for fancy terminal formatting.
@@ -157,17 +159,17 @@ This project uses Rust Edition 2024 features and requires the nightly toolchain.
 rustup install nightly
 
 # Install directly from GitHub
-cargo +nightly install --git https://github.com/Dicklesworthstone/git_safety_guard
+cargo +nightly install --git https://github.com/Dicklesworthstone/dcg
 ```
 
 ### Manual build
 
 ```bash
-git clone https://github.com/Dicklesworthstone/git_safety_guard
-cd git_safety_guard
+git clone https://github.com/Dicklesworthstone/dcg
+cd dcg
 # rust-toolchain.toml automatically selects nightly
 cargo build --release
-cp target/release/git_safety_guard ~/.local/bin/
+cp target/release/dcg ~/.local/bin/
 ```
 
 ### Prebuilt Binaries
@@ -179,7 +181,7 @@ Prebuilt binaries are available for:
 - macOS Apple Silicon (`aarch64-apple-darwin`)
 - Windows (`x86_64-pc-windows-msvc`)
 
-Download from [GitHub Releases](https://github.com/Dicklesworthstone/git_safety_guard/releases) and verify the SHA256 checksum.
+Download from [GitHub Releases](https://github.com/Dicklesworthstone/dcg/releases) and verify the SHA256 checksum.
 
 ## Claude Code Configuration
 
@@ -194,7 +196,7 @@ Add to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "git_safety_guard"
+            "command": "dcg"
           }
         ]
       }
@@ -211,19 +213,19 @@ While primarily designed as a hook, the binary supports direct invocation for te
 
 ```bash
 # Show version with build metadata
-git_safety_guard --version
+dcg --version
 
 # Show help with blocked command categories
-git_safety_guard --help
+dcg --help
 
 # Test a command manually (pipe JSON to stdin)
-echo '{"tool_name":"Bash","tool_input":{"command":"git reset --hard"}}' | git_safety_guard
+echo '{"tool_name":"Bash","tool_input":{"command":"git reset --hard"}}' | dcg
 ```
 
 The `--version` output includes build metadata for debugging:
 
 ```
-git_safety_guard 0.1.0
+dcg 0.1.0
   Built: 2026-01-07T22:13:10.413872881Z
   Rustc: 1.94.0-nightly
   Target: x86_64-unknown-linux-gnu
@@ -265,7 +267,7 @@ This dual-output design ensures the hook protocol works correctly while still pr
                       │
                       ▼ PreToolUse hook (stdin: JSON)
 ┌─────────────────────────────────────────────────────────────────┐
-│                     git_safety_guard                             │
+│                     dcg                             │
 │                                                                  │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │
 │  │    Parse     │───▶│  Normalize   │───▶│ Quick Reject │       │
@@ -576,7 +578,7 @@ When a destructive command is intercepted, the hook outputs a colorful warning t
 
 ```
 ════════════════════════════════════════════════════════════════════════
-BLOCKED  git_safety_guard
+BLOCKED  dcg
 ────────────────────────────────────────────────────────────────────────
 Reason:  git reset --hard destroys uncommitted changes. Use 'git stash' first.
 
@@ -603,7 +605,7 @@ Simultaneously, the hook outputs JSON to stdout for the Claude Code protocol:
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "deny",
-    "permissionDecisionReason": "BLOCKED by git_safety_guard\n\nReason: ..."
+    "permissionDecisionReason": "BLOCKED by dcg\n\nReason: ..."
   }
 }
 ```
@@ -642,8 +644,8 @@ This hook assumes the AI agent is **well-intentioned but fallible**. It's design
 
 1. **Check hook registration**: Verify `~/.claude/settings.json` contains the hook configuration
 2. **Restart Claude Code**: Configuration changes require a restart
-3. **Check binary location**: Ensure `git_safety_guard` is in your PATH
-4. **Test manually**: Run `echo '{"tool_name":"Bash","tool_input":{"command":"git reset --hard"}}' | git_safety_guard`
+3. **Check binary location**: Ensure `dcg` is in your PATH
+4. **Test manually**: Run `echo '{"tool_name":"Bash","tool_input":{"command":"git reset --hard"}}' | dcg`
 
 ### Hook blocking safe commands
 
@@ -694,7 +696,7 @@ The repository includes a comprehensive E2E test script with 120 test cases:
 ./scripts/e2e_test.sh --verbose
 
 # With specific binary path
-./scripts/e2e_test.sh --binary ./target/release/git_safety_guard
+./scripts/e2e_test.sh --binary ./target/release/dcg
 ```
 
 The E2E suite covers:
@@ -766,10 +768,6 @@ The block message instructs the AI to ask you for explicit permission. You can t
 **Q: Does this work with other AI coding tools?**
 
 The hook is designed for Claude Code's `PreToolUse` hook protocol. Other tools would need adapters to match the expected JSON input/output format.
-
-**Q: Why is it called `git_safety_guard` if it blocks more than git commands?**
-
-Historical reasons. The project started as a git-focused safety hook (see Origins above), but the scope has since expanded to cover filesystem operations, with plans to expand further to databases, containers, and more. It's really a "destructive command guard" with a git-centric name. Renaming would break existing installations, so we've kept the name while clarifying its broader purpose.
 
 **Q: Will you add support for blocking database/Docker/Kubernetes commands?**
 

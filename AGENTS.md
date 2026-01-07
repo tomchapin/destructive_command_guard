@@ -1,4 +1,4 @@
-# AGENTS.md — git_safety_guard
+# AGENTS.md — dcg (Destructive Command Guard)
 
 > Guidelines for AI coding agents working in this Rust codebase.
 
@@ -41,7 +41,6 @@ We only use **Cargo** in this project, NEVER any other package manager.
 | `fancy-regex` | Advanced regex with lookahead/lookbehind |
 | `memchr` | SIMD-accelerated substring search |
 | `colored` | Terminal colors with TTY detection |
-| `thiserror` | Structured error types |
 | `vergen-gix` | Build metadata embedding (build.rs) |
 
 ### Release Profile
@@ -167,7 +166,7 @@ echo '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | cargo run --
 |--------|-------|---------|
 | `normalize_command_tests` | 8 | Path stripping for git/rm binaries |
 | `quick_reject_tests` | 5 | Fast-path filtering for non-git/rm commands |
-| `safe_pattern_tests` | 14 | Whitelist accuracy |
+| `safe_pattern_tests` | 16 | Whitelist accuracy |
 | `destructive_pattern_tests` | 20 | Blacklist coverage |
 | `input_parsing_tests` | 8 | JSON parsing robustness |
 | `deny_output_tests` | 2 | Output format validation |
@@ -183,9 +182,9 @@ If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to f
 
 ---
 
-## git_safety_guard — This Project
+## dcg (Destructive Command Guard) — This Project
 
-**This is the project you're working on.** git_safety_guard is a high-performance Claude Code hook that blocks destructive git and filesystem commands before they execute.
+**This is the project you're working on.** dcg is a high-performance Claude Code hook that blocks destructive commands before they execute. It protects against dangerous git commands, filesystem operations, database queries, container commands, and more through a modular pack system.
 
 ### Architecture
 
@@ -205,7 +204,7 @@ JSON Input → Parse → Quick Reject (memchr) → Normalize → Safe Patterns �
 
 ### Pattern System
 
-- **28 safe patterns** (whitelist, checked first)
+- **34 safe patterns** (whitelist, checked first)
 - **16 destructive patterns** (blacklist, checked second)
 - **Default allow** for unmatched commands
 
@@ -528,7 +527,7 @@ rg -l -t rust 'unwrap\(' | xargs ast-grep run -l Rust -p '$X.unwrap()' --json
 
 ```
 mcp__morph-mcp__warp_grep(
-  repoPath: "/path/to/git_safety_guard",
+  repoPath: "/path/to/dcg",
   query: "How does the safe pattern whitelist work?"
 )
 ```

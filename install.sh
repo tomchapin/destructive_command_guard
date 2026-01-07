@@ -2,7 +2,10 @@
 #
 # git_safety_guard installer
 #
-# Usage:
+# One-liner install (with cache buster):
+#   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/git_safety_guard/master/install.sh?$(date +%s)" | bash
+#
+# Or without cache buster:
 #   curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/git_safety_guard/master/install.sh | bash
 #
 # Options:
@@ -13,6 +16,7 @@
 #   --verify           Run self-test after install
 #   --from-source      Build from source instead of downloading binary
 #   --quiet            Suppress non-error output
+#   --no-gum           Disable gum formatting even if available
 #
 set -euo pipefail
 umask 022
@@ -32,12 +36,63 @@ CHECKSUM_URL="${CHECKSUM_URL:-}"
 ARTIFACT_URL="${ARTIFACT_URL:-}"
 LOCK_FILE="/tmp/git-safety-guard-install.lock"
 SYSTEM=0
+NO_GUM=0
 
+# Detect gum for fancy output (https://github.com/charmbracelet/gum)
+HAS_GUM=0
+if command -v gum &> /dev/null && [ -t 1 ]; then
+  HAS_GUM=1
+fi
+
+# Logging functions with optional gum formatting
 log() { [ "$QUIET" -eq 1 ] && return 0; echo -e "$@"; }
-info() { log "\033[0;34m→\033[0m $*"; }
-ok() { log "\033[0;32m✓\033[0m $*"; }
-warn() { log "\033[1;33m⚠\033[0m $*"; }
-err() { log "\033[0;31m✗\033[0m $*"; }
+
+info() {
+  [ "$QUIET" -eq 1 ] && return 0
+  if [ "$HAS_GUM" -eq 1 ] && [ "$NO_GUM" -eq 0 ]; then
+    gum style --foreground 39 "→ $*"
+  else
+    echo -e "\033[0;34m→\033[0m $*"
+  fi
+}
+
+ok() {
+  [ "$QUIET" -eq 1 ] && return 0
+  if [ "$HAS_GUM" -eq 1 ] && [ "$NO_GUM" -eq 0 ]; then
+    gum style --foreground 42 "✓ $*"
+  else
+    echo -e "\033[0;32m✓\033[0m $*"
+  fi
+}
+
+warn() {
+  [ "$QUIET" -eq 1 ] && return 0
+  if [ "$HAS_GUM" -eq 1 ] && [ "$NO_GUM" -eq 0 ]; then
+    gum style --foreground 214 "⚠ $*"
+  else
+    echo -e "\033[1;33m⚠\033[0m $*"
+  fi
+}
+
+err() {
+  if [ "$HAS_GUM" -eq 1 ] && [ "$NO_GUM" -eq 0 ]; then
+    gum style --foreground 196 "✗ $*"
+  else
+    echo -e "\033[0;31m✗\033[0m $*"
+  fi
+}
+
+# Spinner wrapper for long operations
+run_with_spinner() {
+  local title="$1"
+  shift
+  if [ "$HAS_GUM" -eq 1 ] && [ "$NO_GUM" -eq 0 ] && [ "$QUIET" -eq 0 ]; then
+    gum spin --spinner dot --title "$title" -- "$@"
+  else
+    info "$title"
+    "$@"
+  fi
+}
 
 resolve_version() {
   if [ -n "$VERSION" ]; then return 0; fi
@@ -116,7 +171,7 @@ ensure_rust() {
 usage() {
   cat <<EOFU
 Usage: install.sh [--version vX.Y.Z] [--dest DIR] [--system] [--easy-mode] [--verify] \\
-                  [--artifact-url URL] [--checksum HEX] [--checksum-url URL] [--quiet]
+                  [--artifact-url URL] [--checksum HEX] [--checksum-url URL] [--quiet] [--no-gum]
 
 Options:
   --version vX.Y.Z   Install specific version (default: latest)
@@ -126,6 +181,7 @@ Options:
   --verify           Run self-test after install
   --from-source      Build from source instead of downloading binary
   --quiet            Suppress non-error output
+  --no-gum           Disable gum formatting even if available
 EOFU
 }
 
@@ -141,10 +197,29 @@ while [ $# -gt 0 ]; do
     --checksum-url) CHECKSUM_URL="$2"; shift 2;;
     --from-source) FROM_SOURCE=1; shift;;
     --quiet|-q) QUIET=1; shift;;
+    --no-gum) NO_GUM=1; shift;;
     -h|--help) usage; exit 0;;
     *) shift;;
   esac
 done
+
+# Show fancy header
+if [ "$QUIET" -eq 0 ]; then
+  if [ "$HAS_GUM" -eq 1 ] && [ "$NO_GUM" -eq 0 ]; then
+    gum style \
+      --border normal \
+      --border-foreground 39 \
+      --padding "0 1" \
+      --margin "1 0" \
+      "$(gum style --foreground 42 --bold 'git_safety_guard installer')" \
+      "$(gum style --foreground 245 'Blocks destructive git & filesystem commands')"
+  else
+    echo ""
+    echo -e "\033[1;32mgit_safety_guard installer\033[0m"
+    echo -e "\033[0;90mBlocks destructive git & filesystem commands\033[0m"
+    echo ""
+  fi
+fi
 
 resolve_version
 

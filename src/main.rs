@@ -1,4 +1,4 @@
-//! Git/filesystem safety guard for Claude Code.
+//! Destructive Command Guard (dcg) for Claude Code.
 //!
 //! Blocks destructive commands that can lose uncommitted work or delete files.
 //! This hook runs before Bash commands execute and can deny dangerous operations.
@@ -16,11 +16,17 @@
 //! - `memchr` SIMD-accelerated substring search for quick rejection
 //! - Inlined hot paths for better codegen
 
+use clap::Parser;
 use colored::Colorize;
+use destructive_command_guard::cli::{self, Cli};
+use destructive_command_guard::config::Config;
+use destructive_command_guard::hook;
+use destructive_command_guard::packs::{global_quick_reject, REGISTRY};
 use fancy_regex::Regex;
 use memchr::memmem;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::LazyLock;
 
@@ -173,6 +179,22 @@ static SAFE_PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
             r"rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+/var/tmp/"
         ),
         pattern!(
+            "rm-r-f-tmpdir",
+            r"rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+\$TMPDIR/"
+        ),
+        pattern!(
+            "rm-f-r-tmpdir",
+            r"rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+\$TMPDIR/"
+        ),
+        pattern!(
+            "rm-r-f-tmpdir-brace",
+            r"rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+\$\{TMPDIR"
+        ),
+        pattern!(
+            "rm-f-r-tmpdir-brace",
+            r"rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+\$\{TMPDIR"
+        ),
+        pattern!(
             "rm-recursive-force-tmp",
             r"rm\s+.*--recursive.*--force\s+/tmp/"
         ),
@@ -187,6 +209,22 @@ static SAFE_PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         pattern!(
             "rm-force-recursive-var-tmp",
             r"rm\s+.*--force.*--recursive\s+/var/tmp/"
+        ),
+        pattern!(
+            "rm-recursive-force-tmpdir",
+            r"rm\s+.*--recursive.*--force\s+\$TMPDIR/"
+        ),
+        pattern!(
+            "rm-force-recursive-tmpdir",
+            r"rm\s+.*--force.*--recursive\s+\$TMPDIR/"
+        ),
+        pattern!(
+            "rm-recursive-force-tmpdir-brace",
+            r"rm\s+.*--recursive.*--force\s+\$\{TMPDIR"
+        ),
+        pattern!(
+            "rm-force-recursive-tmpdir-brace",
+            r"rm\s+.*--force.*--recursive\s+\$\{TMPDIR"
         ),
     ]
 });
@@ -311,7 +349,7 @@ fn configure_colors() {
 /// Format the denial message for the JSON output (plain text).
 fn format_denial_message(original_command: &str, reason: &str) -> String {
     format!(
-        "BLOCKED by git_safety_guard\n\n\
+        "BLOCKED by dcg\n\n\
          Reason: {reason}\n\n\
          Command: {original_command}\n\n\
          If this operation is truly needed, ask the user for explicit \
@@ -335,7 +373,7 @@ fn print_colorful_warning(original_command: &str, reason: &str) {
     let header = format!(
         "{}  {}",
         "BLOCKED".white().on_red().bold(),
-        "git_safety_guard".red().bold()
+        "dcg".red().bold()
     );
     let _ = writeln!(handle, "{header}");
 
@@ -427,7 +465,7 @@ fn deny(original_command: &str, reason: &str) {
 fn print_version() {
     let version_line = format!(
         "{} {}",
-        "git_safety_guard".green().bold(),
+        "dcg".green().bold(),
         PKG_VERSION.cyan()
     );
     eprintln!("{version_line}");
@@ -447,6 +485,24 @@ fn main() {
     // Configure colors based on TTY detection
     configure_colors();
 
+    // Try to parse CLI arguments
+    let cli = Cli::try_parse();
+
+    // If CLI parsing succeeds and there's a subcommand, handle it
+    if let Ok(cli) = cli {
+        if cli.command.is_some() {
+            if let Err(e) = cli::run_command(cli) {
+                // If the error is "no subcommand provided", fall through to hook mode
+                if e.to_string() != "No subcommand provided. Running in hook mode." {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            } else {
+                return;
+            }
+        }
+    }
+
     // Check for --version flag (useful when run directly, not as hook)
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
@@ -457,6 +513,14 @@ fn main() {
     // Check for --help flag
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_help();
+        return;
+    }
+
+    // Load configuration
+    let config = Config::load();
+
+    // Check if bypass is requested (escape hatch)
+    if Config::is_bypassed() {
         return;
     }
 
@@ -497,16 +561,37 @@ fn main() {
         return;
     }
 
+    // Check explicit allow overrides first
+    for allow in &config.overrides.allow {
+        if allow.condition_met() {
+            if let Ok(re) = Regex::new(allow.pattern()) {
+                if re.is_match(&command).unwrap_or(false) {
+                    return;
+                }
+            }
+        }
+    }
+
+    // Check explicit block overrides
+    for block in &config.overrides.block {
+        if let Ok(re) = Regex::new(&block.pattern) {
+            if re.is_match(&command).unwrap_or(false) {
+                deny(&command, &block.reason);
+                return;
+            }
+        }
+    }
+
     // Quick rejection: if command doesn't contain "git" or "rm", allow immediately.
     // This is the hot path for 99%+ of commands.
-    if quick_reject(&command) {
+    if quick_reject(&command) && global_quick_reject(&command) {
         return;
     }
 
     // Normalize the command (strips /usr/bin/git -> git, etc.)
     let normalized = normalize_command(&command);
 
-    // Check safe patterns first (whitelist approach).
+    // LEGACY: Check safe patterns first (whitelist approach).
     // If any safe pattern matches, allow immediately.
     for pattern in SAFE_PATTERNS.iter() {
         if pattern.regex.is_match(&normalized).unwrap_or(false) {
@@ -514,13 +599,29 @@ fn main() {
         }
     }
 
-    // Check destructive patterns (blacklist approach).
+    // LEGACY: Check destructive patterns (blacklist approach).
     // If any destructive pattern matches, deny with reason.
     for pattern in DESTRUCTIVE_PATTERNS.iter() {
         if pattern.regex.is_match(&normalized).unwrap_or(false) {
             deny(&command, pattern.reason);
             return;
         }
+    }
+
+    // NEW: Check against enabled packs from configuration
+    let enabled_packs: HashSet<String> = config.enabled_pack_ids();
+    let result = REGISTRY.check_command(&normalized, &enabled_packs);
+
+    if result.blocked {
+        let reason = result.reason.as_deref().unwrap_or("Blocked by pack");
+        let pack_id = result.pack_id.as_deref();
+        hook::output_denial(&command, reason, pack_id);
+
+        // Log if configured
+        if let Some(log_file) = &config.general.log_file {
+            let _ = hook::log_blocked_command(log_file, &command, reason, pack_id);
+        }
+        return;
     }
 
     // No pattern matched: default allow
@@ -530,7 +631,7 @@ fn main() {
 fn print_help() {
     eprintln!(
         "{} {} - {}",
-        "git_safety_guard".green().bold(),
+        "dcg".green().bold(),
         PKG_VERSION.cyan(),
         "A Claude Code hook that blocks destructive commands".white()
     );
@@ -547,7 +648,7 @@ fn print_help() {
     eprintln!();
     eprintln!(
         "    {}",
-        r#"{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "git_safety_guard"}]}]}}"#
+        r#"{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "dcg"}]}]}}"#
             .bright_black()
     );
     eprintln!();
@@ -571,7 +672,7 @@ fn print_help() {
     eprintln!();
     eprintln!(
         "For more information: {}",
-        "https://github.com/Dicklesworthstone/git_safety_guard"
+        "https://github.com/Dicklesworthstone/destructive_command_guard"
             .blue()
             .underline()
     );
@@ -764,6 +865,22 @@ mod tests {
             assert!(is_safe("rm --force --recursive /tmp/test"));
             assert!(is_safe("rm --recursive --force /var/tmp/test"));
             assert!(is_safe("rm --force --recursive /var/tmp/test"));
+        }
+
+        #[test]
+        fn allows_rm_with_separate_flags_in_tmpdir() {
+            assert!(is_safe("rm -r -f $TMPDIR/test"));
+            assert!(is_safe("rm -f -r $TMPDIR/test"));
+            assert!(is_safe("rm -r -f ${TMPDIR}/test"));
+            assert!(is_safe("rm -f -r ${TMPDIR}/test"));
+        }
+
+        #[test]
+        fn allows_rm_with_long_flags_in_tmpdir() {
+            assert!(is_safe("rm --recursive --force $TMPDIR/test"));
+            assert!(is_safe("rm --force --recursive $TMPDIR/test"));
+            assert!(is_safe("rm --recursive --force ${TMPDIR}/test"));
+            assert!(is_safe("rm --force --recursive ${TMPDIR}/test"));
         }
     }
 
@@ -1010,7 +1127,7 @@ mod tests {
                     hook_event_name: "PreToolUse",
                     permission_decision: "deny",
                     permission_decision_reason: Cow::Owned(format!(
-                        "BLOCKED by git_safety_guard\n\n\
+                        "BLOCKED by dcg\n\n\
                          Reason: {reason}\n\n\
                          Command: {command}\n\n\
                          If this operation is truly needed, ask the user for explicit \
