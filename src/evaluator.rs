@@ -37,6 +37,7 @@
 //! ```
 
 use crate::config::Config;
+use crate::context::sanitize_for_pattern_matching;
 use crate::packs::{REGISTRY, normalize_command, pack_aware_quick_reject};
 use std::collections::HashSet;
 
@@ -232,8 +233,20 @@ pub fn evaluate_command(
         return EvaluationResult::allowed();
     }
 
+    // False-positive immunity: strip known-safe string arguments (commit messages, search patterns,
+    // issue descriptions, etc.) so dangerous substrings inside data do not trigger blocking.
+    //
+    // If the sanitizer actually removes anything, re-run the keyword gate on the sanitized view.
+    let sanitized = sanitize_for_pattern_matching(command);
+    let command_for_match = sanitized.as_ref();
+    if matches!(sanitized, std::borrow::Cow::Owned(_))
+        && pack_aware_quick_reject(command_for_match, enabled_keywords)
+    {
+        return EvaluationResult::allowed();
+    }
+
     // Step 4: Normalize command (strip /usr/bin/git -> git, etc.)
-    let normalized = normalize_command(command);
+    let normalized = normalize_command(command_for_match);
 
     // Step 5 & 6: Check legacy patterns (safe then destructive)
     // Note: These are currently in main.rs as SAFE_PATTERNS and DESTRUCTIVE_PATTERNS.
@@ -306,8 +319,18 @@ where
         return EvaluationResult::allowed();
     }
 
+    // False-positive immunity: strip known-safe string arguments (commit messages, search patterns,
+    // issue descriptions, etc.) so dangerous substrings inside data do not trigger blocking.
+    let sanitized = sanitize_for_pattern_matching(command);
+    let command_for_match = sanitized.as_ref();
+    if matches!(sanitized, std::borrow::Cow::Owned(_))
+        && pack_aware_quick_reject(command_for_match, enabled_keywords)
+    {
+        return EvaluationResult::allowed();
+    }
+
     // Step 4: Normalize command (strip /usr/bin/git -> git, etc.)
-    let normalized = normalize_command(command);
+    let normalized = normalize_command(command_for_match);
 
     // Step 5: Check legacy safe patterns (whitelist)
     for pattern in safe_patterns {

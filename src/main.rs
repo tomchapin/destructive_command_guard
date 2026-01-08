@@ -20,8 +20,10 @@ use clap::Parser;
 use colored::Colorize;
 use destructive_command_guard::cli::{self, Cli};
 use destructive_command_guard::config::Config;
+use destructive_command_guard::context::sanitize_for_pattern_matching;
 use destructive_command_guard::hook;
-use destructive_command_guard::packs::{REGISTRY, pack_aware_quick_reject};
+use destructive_command_guard::packs::{REGISTRY, normalize_command, pack_aware_quick_reject};
+#[cfg(test)]
 use fancy_regex::Regex;
 #[cfg(test)]
 use memchr::memmem;
@@ -30,6 +32,7 @@ use destructive_command_guard::hook::HookInput;
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{self, BufRead, IsTerminal};
+#[cfg(test)]
 use std::sync::LazyLock;
 
 // Build metadata from vergen (set by build.rs)
@@ -42,6 +45,7 @@ const CARGO_TARGET: Option<&str> = option_env!("VERGEN_CARGO_TARGET_TRIPLE");
 // in the hook module. Use hook::HookInput, hook::read_hook_input(), etc.
 
 /// A safe pattern that, when matched, allows the command immediately.
+#[cfg(test)]
 struct Pattern {
     regex: Regex,
     /// Debug name for the pattern (used in error messages and tests).
@@ -50,12 +54,14 @@ struct Pattern {
 }
 
 /// A destructive pattern that, when matched, blocks the command.
+#[cfg(test)]
 struct DestructivePattern {
     regex: Regex,
     /// Human-readable explanation of why this command is blocked.
     reason: &'static str,
 }
 
+#[cfg(test)]
 macro_rules! pattern {
     ($name:literal, $re:literal) => {
         Pattern {
@@ -65,6 +71,7 @@ macro_rules! pattern {
     };
 }
 
+#[cfg(test)]
 macro_rules! destructive {
     ($re:literal, $reason:literal) => {
         DestructivePattern {
@@ -74,6 +81,7 @@ macro_rules! destructive {
     };
 }
 
+#[cfg(test)]
 static SAFE_PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     vec![
         pattern!("checkout-new-branch", r"git\s+checkout\s+-b\s+"),
@@ -203,6 +211,7 @@ static SAFE_PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     ]
 });
 
+#[cfg(test)]
 static DESTRUCTIVE_PATTERNS: LazyLock<Vec<DestructivePattern>> = LazyLock::new(|| {
     vec![
         destructive!(
@@ -271,11 +280,6 @@ static DESTRUCTIVE_PATTERNS: LazyLock<Vec<DestructivePattern>> = LazyLock::new(|
         ),
     ]
 });
-
-/// Regex to strip absolute paths from git/rm binaries.
-/// Matches patterns like `/usr/bin/git`, `/bin/rm`, `/usr/local/bin/git`.
-static PATH_NORMALIZER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^/(?:\S*/)*s?bin/(rm|git)(?=\s|$)").unwrap());
 
 /// Pre-compiled finders for quick rejection (SIMD-accelerated).
 /// Only used in tests - production code uses `pack_aware_quick_reject` from packs module.
@@ -456,8 +460,21 @@ fn main() {
         return;
     }
 
+    // False-positive immunity: strip known-safe string arguments (commit messages, search patterns,
+    // issue descriptions, etc.) so dangerous substrings inside data do not trigger blocking.
+    //
+    // If the sanitizer actually removes anything, re-run the keyword gate on the sanitized view:
+    // this keeps `bd create --description="... rm -rf ..."` fast and non-blocking.
+    let sanitized = sanitize_for_pattern_matching(&command);
+    let command_for_match = sanitized.as_ref();
+    if matches!(sanitized, Cow::Owned(_))
+        && pack_aware_quick_reject(command_for_match, &enabled_keywords)
+    {
+        return;
+    }
+
     // Normalize the command (strips /usr/bin/git -> git, etc.)
-    let normalized = normalize_command(&command);
+    let normalized = normalize_command(command_for_match);
 
     // Check against enabled packs from configuration
     // (enabled_packs was computed earlier for pack-aware quick reject)

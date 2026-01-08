@@ -720,6 +720,7 @@ pub fn is_argument_data(command: &str, preceding_flag: Option<&str>) -> bool {
 /// This is designed to be used on the hot path, so it returns a borrowed view
 /// when no sanitization is required.
 #[must_use]
+#[allow(clippy::too_many_lines)] // Single-pass masking logic; refactor only if it becomes unreadable
 pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
     let tokens = tokenize_command(command);
     if tokens.is_empty() {
@@ -856,17 +857,17 @@ pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
         if range.start > last {
             out.extend_from_slice(&bytes[last..range.start]);
         }
-        out.extend(std::iter::repeat_n(b' ', range.end.saturating_sub(range.start)));
+        out.extend(std::iter::repeat_n(
+            b' ',
+            range.end.saturating_sub(range.start),
+        ));
         last = range.end;
     }
     if last < bytes.len() {
         out.extend_from_slice(&bytes[last..]);
     }
 
-    match String::from_utf8(out) {
-        Ok(s) => Cow::Owned(s),
-        Err(_) => Cow::Borrowed(command),
-    }
+    String::from_utf8(out).map_or(Cow::Borrowed(command), |s| Cow::Owned(s))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -882,9 +883,15 @@ impl WrapperState {
     #[must_use]
     fn from_command_word(word: &str) -> Option<Self> {
         match word {
-            "sudo" => Some(Self::Sudo { options_ended: false }),
-            "env" => Some(Self::Env { options_ended: false }),
-            "command" => Some(Self::Command { options_ended: false }),
+            "sudo" => Some(Self::Sudo {
+                options_ended: false,
+            }),
+            "env" => Some(Self::Env {
+                options_ended: false,
+            }),
+            "command" => Some(Self::Command {
+                options_ended: false,
+            }),
             _ => None,
         }
     }
@@ -894,7 +901,9 @@ impl WrapperState {
     fn should_skip_token(self, token: &str) -> bool {
         match self {
             Self::None => false,
-            Self::Sudo { options_ended } | Self::Env { options_ended } | Self::Command { options_ended } => {
+            Self::Sudo { options_ended }
+            | Self::Env { options_ended }
+            | Self::Command { options_ended } => {
                 if options_ended {
                     return false;
                 }
@@ -911,21 +920,27 @@ impl WrapperState {
                 if options_ended || token != "--" {
                     Self::Sudo { options_ended }
                 } else {
-                    Self::Sudo { options_ended: true }
+                    Self::Sudo {
+                        options_ended: true,
+                    }
                 }
             }
             Self::Env { options_ended } => {
                 if options_ended || token != "--" {
                     Self::Env { options_ended }
                 } else {
-                    Self::Env { options_ended: true }
+                    Self::Env {
+                        options_ended: true,
+                    }
                 }
             }
             Self::Command { options_ended } => {
                 if options_ended || token != "--" {
                     Self::Command { options_ended }
                 } else {
-                    Self::Command { options_ended: true }
+                    Self::Command {
+                        options_ended: true,
+                    }
                 }
             }
             Self::None => Self::None,
@@ -941,9 +956,7 @@ fn is_env_assignment(token: &str) -> bool {
         return false;
     };
     !key.is_empty()
-        && key
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         && !token.starts_with('-')
 }
 
@@ -1868,5 +1881,46 @@ mod tests {
             .iter()
             .find(|s| s.kind == SpanKind::InlineCode);
         assert!(code_span.is_some(), "python -c content must be InlineCode");
+    }
+
+    #[test]
+    fn sanitize_strips_bd_description_value() {
+        let cmd = r#"bd create --description="This pattern blocks rm -rf""#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("bd create"));
+        assert!(sanitized.as_ref().contains("--description="));
+    }
+
+    #[test]
+    fn sanitize_does_not_strip_when_inline_code_present() {
+        let cmd = r#"bd create --description="$(rm -rf /)""#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        // Inline code must remain visible to the pattern matcher.
+        assert!(matches!(sanitized, std::borrow::Cow::Borrowed(_)));
+        assert!(sanitized.as_ref().contains("rm -rf"));
+    }
+
+    #[test]
+    fn sanitize_strips_rg_positional_pattern() {
+        let cmd = r#"rg -n "rm -rf" src/main.rs"#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("rg -n"));
+    }
+
+    #[test]
+    fn sanitize_handles_sudo_wrapper() {
+        let cmd = r#"sudo git commit -m "Fix rm -rf detection""#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("sudo git commit -m"));
     }
 }
