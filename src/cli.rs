@@ -228,7 +228,7 @@ pub enum Command {
         // === Redaction / truncation ===
         /// Redact sensitive content in output
         #[arg(long, value_enum, default_value = "none")]
-        redact: ScanRedactMode,
+        redact: crate::scan::ScanRedactMode,
 
         /// Truncate long commands in output (chars; 0 = no truncation)
         #[arg(long, value_name = "N", default_value = "200")]
@@ -261,18 +261,6 @@ pub enum Command {
         #[arg(long, value_delimiter = ',')]
         with_packs: Option<Vec<String>>,
     },
-}
-
-/// Redaction mode for scan output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
-pub enum ScanRedactMode {
-    /// No redaction
-    #[default]
-    None,
-    /// Redact quoted strings
-    Quoted,
-    /// Aggressive redaction (paths, args, etc.)
-    Aggressive,
 }
 
 /// Output format for explain command.
@@ -809,10 +797,10 @@ fn handle_scan(
     max_findings: usize,
     exclude: &[String],
     include: &[String],
-    _redact: ScanRedactMode,
-    _truncate: usize,
+    redact: crate::scan::ScanRedactMode,
+    truncate: usize,
     verbose: bool,
-    _top: usize,
+    top: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::scan::{ScanEvalContext, ScanOptions, scan_paths, should_fail};
 
@@ -838,6 +826,8 @@ fn handle_scan(
         fail_on,
         max_file_size_bytes: max_file_size,
         max_findings,
+        redact,
+        truncate,
     };
 
     // Build evaluation context from config
@@ -871,7 +861,7 @@ fn handle_scan(
     // Output results
     match format {
         crate::scan::ScanFormat::Pretty => {
-            print_scan_pretty(&report, verbose);
+            print_scan_pretty(&report, verbose, top);
         }
         crate::scan::ScanFormat::Json => {
             let json = serde_json::to_string_pretty(&report)?;
@@ -1110,60 +1100,98 @@ fn glob_match(pattern: &str, path: &str) -> bool {
 }
 
 /// Print scan report in pretty format.
-fn print_scan_pretty(report: &crate::scan::ScanReport, verbose: bool) {
+fn print_scan_pretty(report: &crate::scan::ScanReport, verbose: bool, top: usize) {
     use colored::Colorize;
 
     if report.findings.is_empty() {
         println!("{}", "No findings.".green());
     } else {
-        println!(
-            "{} finding(s):",
-            report.findings.len().to_string().yellow().bold()
-        );
+        let total = report.findings.len();
+        let shown = if top == 0 { total } else { total.min(top) };
+        println!("{} finding(s):", total.to_string().yellow().bold());
         println!();
 
-        for finding in &report.findings {
+        let mut current_file: Option<&str> = None;
+        for finding in report.findings.iter().take(shown) {
+            if current_file != Some(finding.file.as_str()) {
+                current_file = Some(finding.file.as_str());
+                println!("{}", finding.file.bold());
+            }
+
+            let decision_icon = match finding.decision {
+                crate::scan::ScanDecision::Deny => "DENY".red().bold(),
+                crate::scan::ScanDecision::Warn => "WARN".yellow().bold(),
+                crate::scan::ScanDecision::Allow => "ALLOW".green().bold(),
+            };
+
             let severity_icon = match finding.severity {
-                crate::scan::ScanSeverity::Error => "ERROR".red().bold(),
-                crate::scan::ScanSeverity::Warning => "WARN".yellow().bold(),
-                crate::scan::ScanSeverity::Info => "INFO".blue(),
+                crate::scan::ScanSeverity::Error => "error".red(),
+                crate::scan::ScanSeverity::Warning => "warning".yellow(),
+                crate::scan::ScanSeverity::Info => "info".blue(),
             };
 
             let location = finding.col.map_or_else(
-                || format!("{}:{}", finding.file, finding.line),
-                |col| format!("{}:{}:{}", finding.file, finding.line, col),
+                || finding.line.to_string(),
+                |col| format!("{}:{col}", finding.line),
             );
 
-            println!("[{severity_icon}] {location}");
-            println!("  Command: {}", finding.extracted_command.dimmed());
+            println!(
+                "  [{decision_icon}] ({severity_icon}) {location}  extractor={}",
+                finding.extractor_id
+            );
+            println!("    {}", finding.extracted_command.dimmed());
 
             if let Some(ref rule_id) = finding.rule_id {
-                println!("  Rule: {rule_id}");
+                println!("    Rule: {rule_id}");
             }
 
             if let Some(ref reason) = finding.reason {
-                println!("  Reason: {reason}");
+                println!("    Reason: {reason}");
             }
 
             if let Some(ref suggestion) = finding.suggestion {
-                println!("  Suggestion: {}", suggestion.green());
+                println!("    Suggestion: {}", suggestion.green());
             }
+        }
 
+        if shown < total {
             println!();
+            println!(
+                "{}",
+                format!(
+                    "… {remaining} more finding(s) not shown (use --top 0 to show all)",
+                    remaining = total - shown
+                )
+                .bright_black()
+            );
         }
     }
 
     // Summary
     println!("---");
+    let considered = report.summary.files_scanned + report.summary.files_skipped;
     println!(
-        "Files: {} considered, {} scanned",
-        report.summary.files_considered, report.summary.files_scanned
+        "Files: {considered} considered, {} scanned, {} skipped",
+        report.summary.files_scanned, report.summary.files_skipped
     );
     println!("Commands extracted: {}", report.summary.commands_extracted);
     println!(
-        "Findings: {} ({} blocked, {} warned)",
-        report.summary.findings, report.summary.blocked, report.summary.warned
+        "Findings: {} (allow={}, warn={}, deny={})",
+        report.summary.findings_total,
+        report.summary.decisions.allow,
+        report.summary.decisions.warn,
+        report.summary.decisions.deny
     );
+    println!(
+        "Severities: error={}, warning={}, info={}",
+        report.summary.severities.error,
+        report.summary.severities.warning,
+        report.summary.severities.info
+    );
+
+    if let Some(elapsed_ms) = report.summary.elapsed_ms {
+        println!("Elapsed: {elapsed_ms} ms");
+    }
 
     if report.summary.max_findings_reached {
         println!(
