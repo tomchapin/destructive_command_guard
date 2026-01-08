@@ -25,7 +25,7 @@ use destructive_command_guard::packs::{REGISTRY, pack_aware_quick_reject};
 use fancy_regex::Regex;
 #[cfg(test)]
 use memchr::memmem;
-// Import hook types for tests
+// Import HookInput for parsing stdin JSON in hook mode
 use destructive_command_guard::hook::HookInput;
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -329,11 +329,8 @@ fn configure_colors() {
     }
 }
 
-// NOTE: format_denial_message is now in hook module.
-// Use hook::format_denial_message() if needed.
-
-// NOTE: print_colorful_warning, format_denial_message, and deny() are now in hook module.
-// Use hook::output_denial() for all denial responses.
+// NOTE: Denial output functions (format_denial_message, print_colorful_warning, deny)
+// are now in the hook module. Use hook::output_denial() for all denial responses.
 
 /// Print version information and exit.
 fn print_version() {

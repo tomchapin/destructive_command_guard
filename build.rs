@@ -1,4 +1,4 @@
-//! Build script for `git_safety_guard`.
+//! Build script for `dcg`.
 //!
 //! Embeds build metadata (timestamp, git commit, rustc version) into the binary
 //! for display in --version output and debugging.

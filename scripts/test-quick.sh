@@ -35,7 +35,7 @@ show_help() {
     cat << EOF
 Usage: $0 [options]
 
-Fast feedback loop for git_safety_guard development.
+Fast feedback loop for dcg development.
 
 Options:
   --check     Run clippy and fmt checks first

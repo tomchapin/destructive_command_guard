@@ -835,4 +835,54 @@ mod tests {
             "Should detect inline code after /usr/bin/bash -c"
         );
     }
+
+    #[test]
+    fn test_performance_typical_commands() {
+        use std::time::Instant;
+
+        // Test a variety of typical commands
+        let commands = [
+            "git status",
+            "git commit -m 'Fix bug in parser'",
+            "echo \"hello world\" | cat",
+            "ls -la /tmp",
+            "cargo test --release",
+            "python -c \"print('hello')\"",
+            "bash -c \"echo test && echo done\"",
+            "docker ps --all --format '{{.Names}}'",
+        ];
+
+        // Warm up
+        for cmd in &commands {
+            let _ = classify_command(cmd);
+        }
+
+        // Time 1000 iterations
+        let iterations = 1000;
+        let start = Instant::now();
+        for _ in 0..iterations {
+            for cmd in &commands {
+                let _ = classify_command(cmd);
+            }
+        }
+        let elapsed = start.elapsed();
+
+        // Calculate average per command
+        let total_commands = iterations * commands.len();
+        let avg_ns = elapsed.as_nanos() / total_commands as u128;
+        let avg_us = avg_ns as f64 / 1000.0;
+
+        // Assert performance is under 100μs per command
+        assert!(
+            avg_us < 100.0,
+            "Average classification time {avg_us:.2}μs exceeds 100μs budget"
+        );
+
+        // Print for visibility in test output
+        eprintln!(
+            "Context classification performance: {avg_us:.2}μs/command ({} commands, {} iterations)",
+            commands.len(),
+            iterations
+        );
+    }
 }

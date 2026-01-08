@@ -35,7 +35,7 @@ show_help() {
     cat << EOF
 Usage: $0 [options]
 
-Generate code coverage reports for git_safety_guard.
+Generate code coverage reports for dcg.
 
 Options:
   --open      Open HTML report in browser after generation

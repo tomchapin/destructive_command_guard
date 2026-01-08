@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Environment variable prefix for all config options.
-const ENV_PREFIX: &str = "GIT_SAFETY_GUARD";
+const ENV_PREFIX: &str = "DCG";
 
 /// Default config file name.
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -471,22 +471,22 @@ impl Config {
 
     /// Apply environment variable overrides.
     fn apply_env_overrides(&mut self) {
-        // GIT_SAFETY_GUARD_PACKS="core,database.postgresql,kubernetes"
+        // DCG_PACKS="core,database.postgresql,kubernetes"
         if let Ok(packs) = env::var(format!("{ENV_PREFIX}_PACKS")) {
             self.packs.enabled = packs.split(',').map(|s| s.trim().to_string()).collect();
         }
 
-        // GIT_SAFETY_GUARD_DISABLE="kubernetes.helm"
+        // DCG_DISABLE="kubernetes.helm"
         if let Ok(disable) = env::var(format!("{ENV_PREFIX}_DISABLE")) {
             self.packs.disabled = disable.split(',').map(|s| s.trim().to_string()).collect();
         }
 
-        // GIT_SAFETY_GUARD_VERBOSE=1
+        // DCG_VERBOSE=1
         if env::var(format!("{ENV_PREFIX}_VERBOSE")).is_ok() {
             self.general.verbose = true;
         }
 
-        // GIT_SAFETY_GUARD_COLOR=never
+        // DCG_COLOR=never
         if let Ok(color) = env::var(format!("{ENV_PREFIX}_COLOR")) {
             self.general.color = color;
         }

@@ -239,23 +239,24 @@ fn pack_info(pack_id: &str, show_patterns: bool) -> Result<(), Box<dyn std::erro
 /// 3. Quick rejection (keyword filtering)
 /// 4. Command normalization
 /// 5. Pack pattern matching
+#[allow(clippy::needless_pass_by_value)] // Value is consumed from CLI args
 fn test_command(config: &Config, command: &str, extra_packs: Option<Vec<String>>) {
     // Build effective config with extra packs if specified
-    let effective_config = if let Some(ref packs) = extra_packs {
-        let mut modified = config.clone();
-        modified.packs.enabled.extend(packs.iter().cloned());
-        modified
-    } else {
-        config.clone()
-    };
+    let effective_config = extra_packs.map_or_else(
+        || config.clone(),
+        |packs| {
+            let mut modified = config.clone();
+            modified.packs.enabled.extend(packs);
+            modified
+        },
+    );
 
     // Get enabled packs and collect keywords for quick rejection
     let enabled_packs = effective_config.enabled_pack_ids();
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
-    let keywords: Vec<&str> = enabled_keywords.iter().copied().collect();
 
     // Use shared evaluator for consistent behavior with hook mode
-    let result = evaluate_command(command, &effective_config, &keywords);
+    let result = evaluate_command(command, &effective_config, &enabled_keywords);
 
     println!("Command: {command}");
     println!();

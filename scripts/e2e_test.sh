@@ -219,9 +219,9 @@ test_command_with_packs() {
     local encoded
     encoded=$(echo -n "$json" | base64 -w 0)
 
-    # Run the binary with GIT_SAFETY_GUARD_PACKS environment variable
+    # Run the binary with DCG_PACKS environment variable
     local result
-    result=$(echo "$encoded" | base64 -d | GIT_SAFETY_GUARD_PACKS="$packs" "$BINARY" 2>/dev/null || true)
+    result=$(echo "$encoded" | base64 -d | DCG_PACKS="$packs" "$BINARY" 2>/dev/null || true)
 
     # Check result
     if [[ "$expected" == "block" ]]; then
