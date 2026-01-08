@@ -69,10 +69,12 @@ static HEREDOC_TRIGGERS: LazyLock<RegexSet> = LazyLock::new(|| {
         r"\bperl\s+-[eE]\s",
         // Node.js inline execution
         r"\bnode\s+-[ep]\s",
-        // Shell inline execution (sh -c, bash -c, zsh -c)
-        r"\b(sh|bash|zsh)\s+-c\s",
+        // Shell inline execution (sh -c, bash -c, zsh -c, fish -c)
+        r"\b(sh|bash|zsh|fish)\s+-c\s",
         // Piped execution to interpreters
         r"\|\s*(python3?|ruby|perl|node|sh|bash)\b",
+        // Piped to xargs (can execute arbitrary commands)
+        r"\|\s*xargs\s",
         // exec/eval in various contexts
         r"\beval\s+['\x22]",
         r"\bexec\s+['\x22]",
@@ -348,6 +350,7 @@ mod tests {
                 "bash -c 'echo hello'",
                 "sh -c 'ls'",
                 "zsh -c 'pwd'",
+                "fish -c 'echo hello'",
             ];
 
             for cmd in shell_commands {
@@ -355,6 +358,23 @@ mod tests {
                     check_triggers(cmd),
                     TriggerResult::Triggered,
                     "should trigger on shell inline: {cmd}"
+                );
+            }
+        }
+
+        #[test]
+        fn triggers_on_xargs() {
+            let xargs_commands = [
+                "find . -name '*.bak' | xargs rm",
+                "ls | xargs -I {} echo {}",
+                "cat files.txt | xargs -n1 process",
+            ];
+
+            for cmd in xargs_commands {
+                assert_eq!(
+                    check_triggers(cmd),
+                    TriggerResult::Triggered,
+                    "should trigger on xargs: {cmd}"
                 );
             }
         }
