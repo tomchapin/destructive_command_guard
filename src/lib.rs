@@ -76,6 +76,6 @@ pub use context::{
 
 // Re-export heredoc detection types
 pub use heredoc::{
-    ExtractionLimits, ExtractionResult, ExtractedContent, ScriptLanguage, TriggerResult,
-    check_triggers, extract_content, matched_triggers,
+    ExtractedContent, ExtractionLimits, ExtractionResult, HeredocType, ScriptLanguage,
+    TriggerResult, check_triggers, extract_content, matched_triggers,
 };
