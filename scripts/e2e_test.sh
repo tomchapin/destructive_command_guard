@@ -78,8 +78,9 @@ if [[ -z "$BINARY" ]]; then
 fi
 
 # Convert binary path to absolute (required for allowlist tests that cd to temp dirs)
-if [[ "$BINARY" == ./* ]]; then
-    BINARY="$(pwd)/${BINARY#./}"
+# Handle all relative paths, not just those starting with "./"
+if [[ "$BINARY" != /* ]]; then
+    BINARY="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"
 fi
 
 echo -e "${BOLD}${BLUE}dcg End-to-End Test Suite${NC}"
