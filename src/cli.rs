@@ -1242,6 +1242,7 @@ fn handle_explain(
             rule_id,
             pack_id: pattern.pack_id.clone(),
             pattern_name: pattern.pattern_name.clone(),
+            severity: pattern.severity,
             reason: pattern.reason.clone(),
             source: pattern.source,
             match_start: pattern.matched_span.map(|s| s.start),

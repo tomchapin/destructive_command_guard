@@ -53,6 +53,18 @@ use crate::heredoc::{
 use crate::packs::{REGISTRY, normalize_command, pack_aware_quick_reject};
 use std::collections::HashSet;
 
+/// Convert `ast_matcher::Severity` to `packs::Severity`.
+///
+/// Both enums have identical variants; this bridges the two type systems.
+const fn ast_severity_to_pack_severity(s: crate::ast_matcher::Severity) -> crate::packs::Severity {
+    match s {
+        crate::ast_matcher::Severity::Critical => crate::packs::Severity::Critical,
+        crate::ast_matcher::Severity::High => crate::packs::Severity::High,
+        crate::ast_matcher::Severity::Medium => crate::packs::Severity::Medium,
+        crate::ast_matcher::Severity::Low => crate::packs::Severity::Low,
+    }
+}
+
 /// Maximum length for match text preview (in characters, not bytes).
 const MAX_PREVIEW_CHARS: usize = 80;
 
@@ -144,6 +156,8 @@ pub struct PatternMatch {
     pub pack_id: Option<String>,
     /// The name of the pattern that matched (if available).
     pub pattern_name: Option<String>,
+    /// Severity level of the matched pattern.
+    pub severity: Option<crate::packs::Severity>,
     /// Human-readable reason for blocking.
     pub reason: String,
     /// Source of the match (for debugging/explain mode).
@@ -210,6 +224,7 @@ impl EvaluationResult {
             pattern_info: Some(PatternMatch {
                 pack_id: None,
                 pattern_name: None,
+                severity: None,
                 reason,
                 source: MatchSource::ConfigOverride,
                 matched_span: None,
@@ -228,6 +243,7 @@ impl EvaluationResult {
             pattern_info: Some(PatternMatch {
                 pack_id: None,
                 pattern_name: None,
+                severity: None,
                 reason: reason.to_string(),
                 source: MatchSource::LegacyPattern,
                 matched_span: None,
@@ -247,6 +263,7 @@ impl EvaluationResult {
             pattern_info: Some(PatternMatch {
                 pack_id: None,
                 pattern_name: None,
+                severity: None,
                 reason: reason.to_string(),
                 source: MatchSource::LegacyPattern,
                 matched_span: Some(span),
@@ -265,6 +282,7 @@ impl EvaluationResult {
             pattern_info: Some(PatternMatch {
                 pack_id: Some(pack_id.to_string()),
                 pattern_name: None,
+                severity: None,
                 reason: reason.to_string(),
                 source: MatchSource::Pack,
                 matched_span: None,
@@ -277,12 +295,18 @@ impl EvaluationResult {
     /// Create a "denied" result from a pack with pattern name.
     #[inline]
     #[must_use]
-    pub fn denied_by_pack_pattern(pack_id: &str, pattern_name: &str, reason: &str) -> Self {
+    pub fn denied_by_pack_pattern(
+        pack_id: &str,
+        pattern_name: &str,
+        reason: &str,
+        severity: crate::packs::Severity,
+    ) -> Self {
         Self {
             decision: EvaluationDecision::Deny,
             pattern_info: Some(PatternMatch {
                 pack_id: Some(pack_id.to_string()),
                 pattern_name: Some(pattern_name.to_string()),
+                severity: Some(severity),
                 reason: reason.to_string(),
                 source: MatchSource::Pack,
                 matched_span: None,
@@ -299,6 +323,7 @@ impl EvaluationResult {
         pack_id: &str,
         pattern_name: &str,
         reason: &str,
+        severity: crate::packs::Severity,
         command: &str,
         span: MatchSpan,
     ) -> Self {
@@ -308,6 +333,7 @@ impl EvaluationResult {
             pattern_info: Some(PatternMatch {
                 pack_id: Some(pack_id.to_string()),
                 pattern_name: Some(pattern_name.to_string()),
+                severity: Some(severity),
                 reason: reason.to_string(),
                 source: MatchSource::Pack,
                 matched_span: Some(span),
@@ -564,6 +590,7 @@ fn evaluate_packs_with_allowlists(
                             PatternMatch {
                                 pack_id: Some(pack_id.clone()),
                                 pattern_name: Some(pattern_name.to_string()),
+                                severity: Some(pattern.severity),
                                 reason: reason.to_string(),
                                 source: MatchSource::Pack,
                                 matched_span: None,
@@ -578,7 +605,12 @@ fn evaluate_packs_with_allowlists(
                     continue;
                 }
 
-                return EvaluationResult::denied_by_pack_pattern(pack_id, pattern_name, reason);
+                return EvaluationResult::denied_by_pack_pattern(
+                    pack_id,
+                    pattern_name,
+                    reason,
+                    pattern.severity,
+                );
             }
 
             return EvaluationResult::denied_by_pack(pack_id, reason);
@@ -815,6 +847,7 @@ fn evaluate_heredoc(
                         PatternMatch {
                             pack_id: Some(pack_id),
                             pattern_name: Some(pattern_name),
+                            severity: Some(ast_severity_to_pack_severity(m.severity)),
                             reason,
                             source: MatchSource::HeredocAst,
                             // AST matches already have span info from the matcher
@@ -837,6 +870,7 @@ fn evaluate_heredoc(
                 pattern_info: Some(PatternMatch {
                     pack_id: Some(pack_id),
                     pattern_name: Some(pattern_name),
+                    severity: Some(ast_severity_to_pack_severity(m.severity)),
                     reason,
                     source: MatchSource::HeredocAst,
                     // AST matches already have span info from the matcher
@@ -1041,7 +1075,12 @@ mod tests {
 
     #[test]
     fn test_denied_by_pack_pattern() {
-        let denied = EvaluationResult::denied_by_pack_pattern("core.git", "reset-hard", "test");
+        let denied = EvaluationResult::denied_by_pack_pattern(
+            "core.git",
+            "reset-hard",
+            "test",
+            crate::packs::Severity::Critical,
+        );
         assert!(denied.is_denied());
         assert_eq!(denied.pack_id(), Some("core.git"));
         assert_eq!(
