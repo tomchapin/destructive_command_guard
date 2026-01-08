@@ -446,6 +446,9 @@ fn main() {
     // as empty for hook safety; allowlist decisions are only consulted on matches.
     let allowlists = load_default_allowlists();
 
+    // Compute effective heredoc settings once (avoid per-command parsing/allocations).
+    let heredoc_settings = config.heredoc_settings();
+
     // Get enabled pack IDs early for pack-aware quick reject.
     // This is done before stdin read to minimize latency on the critical path.
     let enabled_packs: HashSet<String> = config.enabled_pack_ids();
@@ -496,6 +499,7 @@ fn main() {
         &ordered_packs,
         &compiled_overrides,
         &allowlists,
+        &heredoc_settings,
     );
 
     if result.decision == EvaluationDecision::Deny {

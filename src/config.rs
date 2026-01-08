@@ -35,9 +35,127 @@ pub struct Config {
     /// Custom overrides.
     pub overrides: OverridesConfig,
 
+    /// Heredoc/inline-script scanning configuration.
+    pub heredoc: HeredocConfig,
+
     /// Project-specific configurations (keyed by absolute path).
     #[serde(default)]
     pub projects: std::collections::HashMap<String, ProjectConfig>,
+}
+
+/// Heredoc and inline-script scanning configuration.
+///
+/// This configuration controls Tier 1/2/3 heredoc scanning behavior. Because the
+/// hook is performance- and UX-sensitive, defaults are conservative and fail-open
+/// on extraction/parse errors.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeredocConfig {
+    /// Enable heredoc/inline-script scanning.
+    pub enabled: Option<bool>,
+
+    /// Timeout budget for Tier 2 extraction (milliseconds).
+    pub timeout_ms: Option<u64>,
+
+    /// Maximum bytes extracted from heredoc bodies.
+    pub max_body_bytes: Option<usize>,
+
+    /// Maximum number of lines extracted from heredoc bodies.
+    pub max_body_lines: Option<usize>,
+
+    /// Maximum number of heredocs to process per command.
+    pub max_heredocs: Option<usize>,
+
+    /// Optional allowlist of languages to scan.
+    ///
+    /// Values are case-insensitive and may include aliases:
+    /// - bash: bash, sh, shell
+    /// - javascript: javascript, js, node
+    /// - typescript: typescript, ts
+    pub languages: Option<Vec<String>>,
+
+    /// Fail-open when AST parsing fails for embedded code.
+    pub fallback_on_parse_error: Option<bool>,
+
+    /// Fail-open when extraction/parsing exceeds the timeout budget.
+    pub fallback_on_timeout: Option<bool>,
+}
+
+/// Effective heredoc scanning settings used by the evaluator.
+#[derive(Debug, Clone)]
+pub struct HeredocSettings {
+    pub enabled: bool,
+    pub limits: crate::heredoc::ExtractionLimits,
+    pub allowed_languages: Option<Vec<crate::heredoc::ScriptLanguage>>,
+    pub fallback_on_parse_error: bool,
+    pub fallback_on_timeout: bool,
+}
+
+impl HeredocConfig {
+    #[must_use]
+    pub fn settings(&self) -> HeredocSettings {
+        let mut limits = crate::heredoc::ExtractionLimits::default();
+        if let Some(timeout_ms) = self.timeout_ms {
+            limits.timeout_ms = timeout_ms;
+        }
+        if let Some(max_body_bytes) = self.max_body_bytes {
+            limits.max_body_bytes = max_body_bytes;
+        }
+        if let Some(max_body_lines) = self.max_body_lines {
+            limits.max_body_lines = max_body_lines;
+        }
+        if let Some(max_heredocs) = self.max_heredocs {
+            limits.max_heredocs = max_heredocs;
+        }
+
+        let allowed_languages = self.languages.as_ref().and_then(|langs| {
+            let mut parsed: Vec<crate::heredoc::ScriptLanguage> = Vec::new();
+            for raw in langs {
+                let raw = raw.trim();
+                if raw.is_empty() {
+                    continue;
+                }
+
+                if raw.eq_ignore_ascii_case("all") {
+                    return None;
+                }
+
+                let lang = match raw.to_ascii_lowercase().as_str() {
+                    "bash" | "sh" | "shell" => Some(crate::heredoc::ScriptLanguage::Bash),
+                    "python" => Some(crate::heredoc::ScriptLanguage::Python),
+                    "ruby" => Some(crate::heredoc::ScriptLanguage::Ruby),
+                    "perl" => Some(crate::heredoc::ScriptLanguage::Perl),
+                    "javascript" | "js" | "node" => {
+                        Some(crate::heredoc::ScriptLanguage::JavaScript)
+                    }
+                    "typescript" | "ts" => Some(crate::heredoc::ScriptLanguage::TypeScript),
+                    "unknown" => Some(crate::heredoc::ScriptLanguage::Unknown),
+                    _ => None,
+                };
+
+                if let Some(lang) = lang {
+                    if !parsed.contains(&lang) {
+                        parsed.push(lang);
+                    }
+                }
+            }
+
+            if parsed.is_empty() {
+                // Avoid accidental full-disable due to typos: treat as "all".
+                None
+            } else {
+                Some(parsed)
+            }
+        });
+
+        HeredocSettings {
+            enabled: self.enabled.unwrap_or(true),
+            limits,
+            allowed_languages,
+            fallback_on_parse_error: self.fallback_on_parse_error.unwrap_or(true),
+            fallback_on_timeout: self.fallback_on_timeout.unwrap_or(true),
+        }
+    }
 }
 
 /// General configuration options.
@@ -465,30 +583,95 @@ impl Config {
         self.overrides.allow.extend(other.overrides.allow);
         self.overrides.block.extend(other.overrides.block);
 
+        // Merge heredoc config (field-wise; other wins when set)
+        if other.heredoc.enabled.is_some() {
+            self.heredoc.enabled = other.heredoc.enabled;
+        }
+        if other.heredoc.timeout_ms.is_some() {
+            self.heredoc.timeout_ms = other.heredoc.timeout_ms;
+        }
+        if other.heredoc.max_body_bytes.is_some() {
+            self.heredoc.max_body_bytes = other.heredoc.max_body_bytes;
+        }
+        if other.heredoc.max_body_lines.is_some() {
+            self.heredoc.max_body_lines = other.heredoc.max_body_lines;
+        }
+        if other.heredoc.max_heredocs.is_some() {
+            self.heredoc.max_heredocs = other.heredoc.max_heredocs;
+        }
+        if other.heredoc.languages.is_some() {
+            self.heredoc.languages = other.heredoc.languages;
+        }
+        if other.heredoc.fallback_on_parse_error.is_some() {
+            self.heredoc.fallback_on_parse_error = other.heredoc.fallback_on_parse_error;
+        }
+        if other.heredoc.fallback_on_timeout.is_some() {
+            self.heredoc.fallback_on_timeout = other.heredoc.fallback_on_timeout;
+        }
+
         // Merge project configs
         self.projects.extend(other.projects);
     }
 
     /// Apply environment variable overrides.
     fn apply_env_overrides(&mut self) {
+        self.apply_env_overrides_from(|key| env::var(key).ok());
+    }
+
+    fn apply_env_overrides_from<F>(&mut self, mut get_env: F)
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
         // DCG_PACKS="core,database.postgresql,kubernetes"
-        if let Ok(packs) = env::var(format!("{ENV_PREFIX}_PACKS")) {
+        if let Some(packs) = get_env(&format!("{ENV_PREFIX}_PACKS")) {
             self.packs.enabled = packs.split(',').map(|s| s.trim().to_string()).collect();
         }
 
         // DCG_DISABLE="kubernetes.helm"
-        if let Ok(disable) = env::var(format!("{ENV_PREFIX}_DISABLE")) {
+        if let Some(disable) = get_env(&format!("{ENV_PREFIX}_DISABLE")) {
             self.packs.disabled = disable.split(',').map(|s| s.trim().to_string()).collect();
         }
 
         // DCG_VERBOSE=1
-        if env::var(format!("{ENV_PREFIX}_VERBOSE")).is_ok() {
+        if get_env(&format!("{ENV_PREFIX}_VERBOSE")).is_some() {
             self.general.verbose = true;
         }
 
         // DCG_COLOR=never
-        if let Ok(color) = env::var(format!("{ENV_PREFIX}_COLOR")) {
+        if let Some(color) = get_env(&format!("{ENV_PREFIX}_COLOR")) {
             self.general.color = color;
+        }
+
+        // -----------------------------------------------------------------
+        // Heredoc scanning (env overrides)
+        // -----------------------------------------------------------------
+
+        // DCG_HEREDOC_ENABLED=true|false|1|0
+        if let Some(enabled) = get_env(&format!("{ENV_PREFIX}_HEREDOC_ENABLED")) {
+            if let Some(parsed) = parse_env_bool(&enabled) {
+                self.heredoc.enabled = Some(parsed);
+            }
+        }
+
+        // DCG_HEREDOC_TIMEOUT=50 (ms)
+        let timeout_var = format!("{ENV_PREFIX}_HEREDOC_TIMEOUT");
+        let timeout_ms_var = format!("{ENV_PREFIX}_HEREDOC_TIMEOUT_MS");
+        if let Some(timeout_ms) = get_env(&timeout_ms_var).or_else(|| get_env(&timeout_var)) {
+            if let Ok(parsed) = timeout_ms.trim().parse::<u64>() {
+                self.heredoc.timeout_ms = Some(parsed);
+            }
+        }
+
+        // DCG_HEREDOC_LANGUAGES=python,bash,javascript
+        if let Some(langs) = get_env(&format!("{ENV_PREFIX}_HEREDOC_LANGUAGES")) {
+            let parsed: Vec<String> = langs
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !parsed.is_empty() {
+                self.heredoc.languages = Some(parsed);
+            }
         }
     }
 
@@ -532,6 +715,12 @@ impl Config {
         enabled.insert("core".to_string());
 
         enabled
+    }
+
+    /// Get effective heredoc scanning settings for evaluation.
+    #[must_use]
+    pub fn heredoc_settings(&self) -> HeredocSettings {
+        self.heredoc.settings()
     }
 
     /// Get the path to the user config file (creates dir if needed).
@@ -579,12 +768,14 @@ impl Config {
                 disabled: vec![],
             },
             overrides: OverridesConfig::default(),
+            heredoc: HeredocConfig::default(),
             projects: std::collections::HashMap::new(),
         }
     }
 
     /// Generate a sample configuration string with comments.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn generate_sample_config() -> String {
         r#"# dcg configuration
 # https://github.com/Dicklesworthstone/destructive_command_guard
@@ -672,6 +863,29 @@ block = [
 ]
 
 #─────────────────────────────────────────────────────────────
+# HEREDOC / INLINE SCRIPT SCANNING
+#─────────────────────────────────────────────────────────────
+
+[heredoc]
+# Enable scanning for heredocs and inline scripts (python -c, bash -c, etc.).
+enabled = true
+
+# Extraction timeout budget (milliseconds). Parsing/matching has its own budget.
+timeout_ms = 50
+
+# Resource limits for extracted bodies (Tier 2).
+max_body_bytes = 1048576
+max_body_lines = 10000
+max_heredocs = 10
+
+# Optional language filter (scan only these languages). Omit for "all".
+# languages = ["python", "bash", "javascript", "typescript", "ruby", "perl"]
+
+# Graceful degradation (hook defaults are fail-open).
+fallback_on_parse_error = true
+fallback_on_timeout = true
+
+#─────────────────────────────────────────────────────────────
 # PROJECT-SPECIFIC OVERRIDES
 #─────────────────────────────────────────────────────────────
 
@@ -687,6 +901,14 @@ block = [
 # packs.enabled = ["kubernetes", "cloud.aws", "infrastructure.terraform"]
 "#
         .to_string()
+    }
+}
+
+fn parse_env_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Some(true),
+        "0" | "false" | "no" | "n" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -762,6 +984,56 @@ mod tests {
                 .enabled
                 .contains(&"database.postgresql".to_string())
         );
+    }
+
+    #[test]
+    fn test_heredoc_settings_defaults() {
+        let config = Config::default();
+        let settings = config.heredoc_settings();
+        assert!(settings.enabled);
+        assert_eq!(settings.limits.timeout_ms, 50);
+        assert!(settings.allowed_languages.is_none());
+        assert!(settings.fallback_on_parse_error);
+        assert!(settings.fallback_on_timeout);
+    }
+
+    #[test]
+    fn test_heredoc_env_overrides_enabled_timeout_languages() {
+        let env_map: std::collections::HashMap<&str, &str> = std::collections::HashMap::from([
+            ("DCG_HEREDOC_ENABLED", "0"),
+            ("DCG_HEREDOC_TIMEOUT_MS", "123"),
+            ("DCG_HEREDOC_LANGUAGES", "python, bash, js, unknown_value"),
+        ]);
+        let mut config = Config::default();
+        config.apply_env_overrides_from(|key| env_map.get(key).map(|v| (*v).to_string()));
+
+        let settings = config.heredoc_settings();
+        assert!(!settings.enabled);
+        assert_eq!(settings.limits.timeout_ms, 123);
+        assert_eq!(
+            settings.allowed_languages,
+            Some(vec![
+                crate::heredoc::ScriptLanguage::Python,
+                crate::heredoc::ScriptLanguage::Bash,
+                crate::heredoc::ScriptLanguage::JavaScript
+            ])
+        );
+    }
+
+    #[test]
+    fn test_heredoc_language_filter_all_is_treated_as_unfiltered() {
+        let mut config = Config::default();
+        config.heredoc.languages = Some(vec!["all".to_string(), "python".to_string()]);
+        let settings = config.heredoc_settings();
+        assert!(settings.allowed_languages.is_none());
+    }
+
+    #[test]
+    fn test_heredoc_language_filter_invalid_only_falls_back_to_all() {
+        let mut config = Config::default();
+        config.heredoc.languages = Some(vec!["definitely_not_a_language".to_string()]);
+        let settings = config.heredoc_settings();
+        assert!(settings.allowed_languages.is_none());
     }
 
     // ========================================================================

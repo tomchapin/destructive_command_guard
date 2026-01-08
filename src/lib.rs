@@ -108,4 +108,4 @@ pub use trace::{
 };
 
 // Re-export suggestion types
-pub use suggestions::{Suggestion, SuggestionKind, get_suggestions, get_suggestion_by_kind};
+pub use suggestions::{Suggestion, SuggestionKind, get_suggestion_by_kind, get_suggestions};

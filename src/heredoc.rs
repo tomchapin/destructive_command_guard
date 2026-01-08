@@ -1232,8 +1232,10 @@ pub fn extract_shell_commands(content: &str) -> Vec<ExtractedShellCommand> {
 /// Recursively collect command nodes from the AST.
 ///
 /// Walks the tree looking for "command" nodes (simple commands in bash).
-/// Also recurses into `command_substitution` and subshell nodes to find
-/// commands inside $(...) and (...).
+/// Recurses into all child nodes to find nested commands, including:
+/// - Command substitutions: `$(...)`
+/// - Subshells: `(...)`
+/// - Pipelines, command lists, loops, conditionals, etc.
 #[allow(clippy::needless_pass_by_value)]
 fn collect_commands_recursive<D: ast_grep_core::Doc>(
     node: ast_grep_core::Node<'_, D>,
@@ -2526,19 +2528,29 @@ echo "done""#;
 
         #[test]
         fn heredoc_delimiter_is_not_command() {
-            // The EOF itself is not a command
+            // The EOF itself is not a command, and heredoc BODY content is DATA not commands
             let script = r"cat << EOF
 some content
 rm -rf / mentioned in text
 EOF";
             let commands = extract_shell_commands(script);
-            // Should extract cat, but not EOF
+
+            // Should extract cat command
             assert!(
                 commands.iter().any(|c| c.text.starts_with("cat")),
                 "should extract cat command"
             );
-            // The heredoc content (rm -rf...) is data, not a command
-            // However, tree-sitter may not parse this fully without proper context
+
+            // CRITICAL: heredoc body content must NOT be extracted as commands
+            // The "rm -rf /" text inside the heredoc is DATA, not an executable command
+            let rm_commands: Vec<_> = commands
+                .iter()
+                .filter(|c| c.text.contains("rm") && !c.text.contains("cat"))
+                .collect();
+            assert!(
+                rm_commands.is_empty(),
+                "heredoc body content must NOT be extracted as commands, but found: {rm_commands:?}"
+            );
         }
 
         #[test]

@@ -48,11 +48,10 @@ use crate::ast_matcher::DEFAULT_MATCHER;
 use crate::config::Config;
 use crate::context::sanitize_for_pattern_matching;
 use crate::heredoc::{
-    ExtractionLimits, ExtractionResult, TriggerResult, check_triggers, extract_content,
+    ExtractionResult, SkipReason, TriggerResult, check_triggers, extract_content,
 };
 use crate::packs::{REGISTRY, normalize_command, pack_aware_quick_reject};
 use std::collections::HashSet;
-use std::sync::LazyLock;
 
 /// The decision made by the evaluator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,12 +266,14 @@ pub fn evaluate_command(
 ) -> EvaluationResult {
     let enabled_packs: HashSet<String> = config.enabled_pack_ids();
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
+    let heredoc_settings = config.heredoc_settings();
     evaluate_command_with_pack_order(
         command,
         enabled_keywords,
         &ordered_packs,
         compiled_overrides,
         allowlists,
+        &heredoc_settings,
     )
 }
 
@@ -296,6 +297,7 @@ pub fn evaluate_command_with_pack_order(
     ordered_packs: &[String],
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
+    heredoc_settings: &crate::config::HeredocSettings,
 ) -> EvaluationResult {
     // Empty commands are allowed (no-op)
     if command.is_empty() {
@@ -322,7 +324,7 @@ pub fn evaluate_command_with_pack_order(
     let mut precomputed_sanitized = None;
     let mut heredoc_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
 
-    if check_triggers(command) == TriggerResult::Triggered {
+    if heredoc_settings.enabled && check_triggers(command) == TriggerResult::Triggered {
         let sanitized = sanitize_for_pattern_matching(command);
         let sanitized_str = sanitized.as_ref();
         let should_scan = if matches!(sanitized, std::borrow::Cow::Owned(_)) {
@@ -333,8 +335,12 @@ pub fn evaluate_command_with_pack_order(
         precomputed_sanitized = Some(sanitized);
 
         if should_scan {
-            if let Some(blocked) = evaluate_heredoc(command, allowlists, &mut heredoc_allowlist_hit)
-            {
+            if let Some(blocked) = evaluate_heredoc(
+                command,
+                allowlists,
+                heredoc_settings,
+                &mut heredoc_allowlist_hit,
+            ) {
                 return blocked;
             }
         }
@@ -503,9 +509,10 @@ where
 
     // Step 3: Heredoc / inline-script detection (Tier 1/2/3, fail-open).
     // See `evaluate_command` for detailed rationale.
+    let heredoc_settings = config.heredoc_settings();
     let mut precomputed_sanitized = None;
     let mut heredoc_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
-    if check_triggers(command) == TriggerResult::Triggered {
+    if heredoc_settings.enabled && check_triggers(command) == TriggerResult::Triggered {
         let sanitized = sanitize_for_pattern_matching(command);
         let sanitized_str = sanitized.as_ref();
         let should_scan = if matches!(sanitized, std::borrow::Cow::Owned(_)) {
@@ -516,8 +523,12 @@ where
         precomputed_sanitized = Some(sanitized);
 
         if should_scan {
-            if let Some(blocked) = evaluate_heredoc(command, allowlists, &mut heredoc_allowlist_hit)
-            {
+            if let Some(blocked) = evaluate_heredoc(
+                command,
+                allowlists,
+                &heredoc_settings,
+                &mut heredoc_allowlist_hit,
+            ) {
                 return blocked;
             }
         }
@@ -579,26 +590,80 @@ where
 // Heredoc / Inline Script Evaluation (Tier 2/3)
 // ============================================================================
 
-static DEFAULT_EXTRACTION_LIMITS: LazyLock<ExtractionLimits> =
-    LazyLock::new(ExtractionLimits::default);
-
 fn evaluate_heredoc(
     command: &str,
     allowlists: &LayeredAllowlist,
+    heredoc_settings: &crate::config::HeredocSettings,
     first_allowlist_hit: &mut Option<(PatternMatch, AllowlistLayer, String)>,
 ) -> Option<EvaluationResult> {
-    let extracted = match extract_content(command, &DEFAULT_EXTRACTION_LIMITS) {
+    let extracted = match extract_content(command, &heredoc_settings.limits) {
         ExtractionResult::Extracted(contents) => contents,
-        ExtractionResult::NoContent
-        | ExtractionResult::Skipped(_)
-        | ExtractionResult::Failed(_) => {
+        ExtractionResult::NoContent => return None,
+        ExtractionResult::Skipped(reasons) => {
+            let is_timeout = reasons
+                .iter()
+                .any(|r| matches!(r, SkipReason::Timeout { .. }));
+
+            let strict_timeout = is_timeout && !heredoc_settings.fallback_on_timeout;
+            let strict_other = !is_timeout && !heredoc_settings.fallback_on_parse_error;
+            if strict_timeout || strict_other {
+                let summary = reasons
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let reason = if strict_timeout {
+                    format!(
+                        "Embedded code blocked: extraction exceeded timeout and \
+                         fallback_on_timeout=false ({summary})"
+                    )
+                } else {
+                    format!(
+                        "Embedded code blocked: extraction skipped and \
+                         fallback_on_parse_error=false ({summary})"
+                    )
+                };
+                return Some(EvaluationResult::denied_by_legacy(&reason));
+            }
+
+            return None;
+        }
+        ExtractionResult::Failed(err) => {
+            if !heredoc_settings.fallback_on_parse_error {
+                let reason = format!(
+                    "Embedded code blocked: extraction failed and \
+                     fallback_on_parse_error=false ({err})"
+                );
+                return Some(EvaluationResult::denied_by_legacy(&reason));
+            }
+
             return None;
         }
     };
 
     for content in extracted {
-        let Ok(matches) = DEFAULT_MATCHER.find_matches(&content.content, content.language) else {
-            continue; // Fail-open on parse/timeout/unsupported
+        if let Some(allowed) = &heredoc_settings.allowed_languages {
+            if !allowed.contains(&content.language) {
+                continue;
+            }
+        }
+
+        let matches = match DEFAULT_MATCHER.find_matches(&content.content, content.language) {
+            Ok(matches) => matches,
+            Err(err) => {
+                let is_timeout = matches!(err, crate::ast_matcher::MatchError::Timeout { .. });
+                let strict_timeout = is_timeout && !heredoc_settings.fallback_on_timeout;
+                let strict_other = !is_timeout && !heredoc_settings.fallback_on_parse_error;
+                if strict_timeout || strict_other {
+                    let reason = format!(
+                        "Embedded code blocked: AST matching error with strict fallback \
+                         configuration ({err})"
+                    );
+                    return Some(EvaluationResult::denied_by_legacy(&reason));
+                }
+
+                continue;
+            }
         };
 
         for m in matches {
@@ -939,6 +1004,34 @@ mod tests {
         // Non-catastrophic recursive deletes are currently warn-only; evaluator should not block.
         let cmd =
             "node <<EOF\nconst fs = require('fs');\nfs.rmSync('./dist', { recursive: true });\nEOF";
+        let result = evaluate_command(cmd, &config, &["kubectl"], &compiled, &allowlists);
+        assert!(result.is_allowed());
+        assert!(result.pattern_info.is_none());
+    }
+
+    #[test]
+    fn heredoc_scanning_can_be_disabled_via_config() {
+        let mut config = default_config();
+        config.heredoc.enabled = Some(false);
+        let compiled = default_compiled_overrides();
+        let allowlists = default_allowlists();
+
+        let cmd =
+            "node <<EOF\nconst fs = require('fs');\nfs.rmSync('/etc', { recursive: true });\nEOF";
+        let result = evaluate_command(cmd, &config, &["kubectl"], &compiled, &allowlists);
+        assert!(result.is_allowed());
+        assert!(result.pattern_info.is_none());
+    }
+
+    #[test]
+    fn heredoc_language_filter_can_skip_unwanted_languages() {
+        let mut config = default_config();
+        config.heredoc.languages = Some(vec!["python".to_string()]);
+        let compiled = default_compiled_overrides();
+        let allowlists = default_allowlists();
+
+        let cmd =
+            "node <<EOF\nconst fs = require('fs');\nfs.rmSync('/etc', { recursive: true });\nEOF";
         let result = evaluate_command(cmd, &config, &["kubectl"], &compiled, &allowlists);
         assert!(result.is_allowed());
         assert!(result.pattern_info.is_none());

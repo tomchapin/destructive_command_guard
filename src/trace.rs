@@ -27,10 +27,11 @@
 //!
 //! ```ignore
 //! use destructive_command_guard::trace::TraceCollector;
+//! use destructive_command_guard::evaluator::EvaluationDecision;
 //!
-//! let mut collector = TraceCollector::new();
+//! let mut collector = TraceCollector::new("git reset --hard");
 //! // ... pass &mut collector to evaluator ...
-//! let trace = collector.finish();
+//! let trace = collector.finish(EvaluationDecision::Deny);
 //!
 //! println!("Decision: {:?}", trace.decision);
 //! println!("Total time: {}us", trace.total_duration_us);
@@ -339,11 +340,9 @@ impl ExplainTrace {
     /// Get the first match (either from denial or allowlist).
     #[must_use]
     pub fn first_match(&self) -> Option<&MatchInfo> {
-        self.match_info.as_ref().or_else(|| {
-            self.allowlist_info
-                .as_ref()
-                .map(|a| &a.original_match)
-        })
+        self.match_info
+            .as_ref()
+            .or_else(|| self.allowlist_info.as_ref().map(|a| &a.original_match))
     }
 
     /// Find a step by name.
@@ -396,10 +395,7 @@ mod tests {
         assert_eq!(trace.steps.len(), 1);
         assert_eq!(trace.steps[0].name, "keyword_gating");
         assert!(trace.match_info.is_some());
-        assert_eq!(
-            trace.rule_id(),
-            Some("core.git:reset-hard")
-        );
+        assert_eq!(trace.rule_id(), Some("core.git:reset-hard"));
     }
 
     #[test]
@@ -459,19 +455,31 @@ mod tests {
     fn trace_step_ordering_preserved() {
         let mut collector = TraceCollector::new("test");
 
-        collector.record_step("step1", 10, TraceDetails::InputParsing {
-            is_hook_input: false,
-            command_len: 4,
-        });
-        collector.record_step("step2", 20, TraceDetails::KeywordGating {
-            quick_rejected: true,
-            keywords_checked: vec![],
-            first_match: None,
-        });
-        collector.record_step("step3", 30, TraceDetails::PolicyDecision {
-            decision: EvaluationDecision::Allow,
-            allowlisted: false,
-        });
+        collector.record_step(
+            "step1",
+            10,
+            TraceDetails::InputParsing {
+                is_hook_input: false,
+                command_len: 4,
+            },
+        );
+        collector.record_step(
+            "step2",
+            20,
+            TraceDetails::KeywordGating {
+                quick_rejected: true,
+                keywords_checked: vec![],
+                first_match: None,
+            },
+        );
+        collector.record_step(
+            "step3",
+            30,
+            TraceDetails::PolicyDecision {
+                decision: EvaluationDecision::Allow,
+                allowlisted: false,
+            },
+        );
 
         let trace = collector.finish(EvaluationDecision::Allow);
 
@@ -488,11 +496,15 @@ mod tests {
     fn trace_find_step() {
         let mut collector = TraceCollector::new("test");
 
-        collector.record_step("keyword_gating", 10, TraceDetails::KeywordGating {
-            quick_rejected: false,
-            keywords_checked: vec!["git".to_string()],
-            first_match: Some("git".to_string()),
-        });
+        collector.record_step(
+            "keyword_gating",
+            10,
+            TraceDetails::KeywordGating {
+                quick_rejected: false,
+                keywords_checked: vec!["git".to_string()],
+                first_match: Some("git".to_string()),
+            },
+        );
 
         let trace = collector.finish(EvaluationDecision::Allow);
 

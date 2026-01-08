@@ -181,7 +181,7 @@ fn register_core_git_suggestions(m: &mut HashMap<&'static str, Vec<Suggestion>>)
     );
 
     m.insert(
-        "core.git:clean-fd",
+        "core.git:clean-force",
         vec![
             Suggestion::new(
                 SuggestionKind::PreviewFirst,
@@ -200,43 +200,49 @@ fn register_core_git_suggestions(m: &mut HashMap<&'static str, Vec<Suggestion>>)
         ],
     );
 
+    // Force push patterns (--force and -f variants)
+    let force_push_suggestions = vec![
+        Suggestion::new(
+            SuggestionKind::SaferAlternative,
+            "Use `git push --force-with-lease` to prevent overwriting others' work",
+        )
+        .with_command("git push --force-with-lease"),
+        Suggestion::new(
+            SuggestionKind::PreviewFirst,
+            "Run `git log origin/branch..HEAD` to see commits being pushed",
+        ),
+        Suggestion::new(
+            SuggestionKind::WorkflowFix,
+            "Coordinate with team before force pushing to shared branches",
+        ),
+    ];
+    m.insert("core.git:push-force-long", force_push_suggestions.clone());
+    m.insert("core.git:push-force-short", force_push_suggestions);
+
+    // Checkout patterns that discard changes
+    let checkout_discard_suggestions = vec![
+        Suggestion::new(
+            SuggestionKind::PreviewFirst,
+            "Run `git status` and `git diff` to see uncommitted changes that would be lost",
+        )
+        .with_command("git status && git diff"),
+        Suggestion::new(
+            SuggestionKind::WorkflowFix,
+            "Commit or stash changes before discarding",
+        )
+        .with_command("git stash"),
+    ];
     m.insert(
-        "core.git:push-force",
-        vec![
-            Suggestion::new(
-                SuggestionKind::SaferAlternative,
-                "Use `git push --force-with-lease` to prevent overwriting others' work",
-            )
-            .with_command("git push --force-with-lease"),
-            Suggestion::new(
-                SuggestionKind::PreviewFirst,
-                "Run `git log origin/branch..HEAD` to see commits being pushed",
-            ),
-            Suggestion::new(
-                SuggestionKind::WorkflowFix,
-                "Coordinate with team before force pushing to shared branches",
-            ),
-        ],
+        "core.git:checkout-discard",
+        checkout_discard_suggestions.clone(),
+    );
+    m.insert(
+        "core.git:checkout-ref-discard",
+        checkout_discard_suggestions,
     );
 
     m.insert(
-        "core.git:checkout-force",
-        vec![
-            Suggestion::new(
-                SuggestionKind::PreviewFirst,
-                "Run `git status` to see uncommitted changes that would be lost",
-            )
-            .with_command("git status"),
-            Suggestion::new(
-                SuggestionKind::WorkflowFix,
-                "Commit or stash changes before switching branches",
-            )
-            .with_command("git stash"),
-        ],
-    );
-
-    m.insert(
-        "core.git:branch-delete-force",
+        "core.git:branch-force-delete",
         vec![
             Suggestion::new(
                 SuggestionKind::PreviewFirst,
@@ -331,7 +337,10 @@ mod tests {
     #[test]
     fn suggestion_kind_labels() {
         assert_eq!(SuggestionKind::PreviewFirst.label(), "Preview first");
-        assert_eq!(SuggestionKind::SaferAlternative.label(), "Safer alternative");
+        assert_eq!(
+            SuggestionKind::SaferAlternative.label(),
+            "Safer alternative"
+        );
         assert_eq!(SuggestionKind::WorkflowFix.label(), "Workflow fix");
         assert_eq!(SuggestionKind::Documentation.label(), "Documentation");
         assert_eq!(SuggestionKind::AllowSafely.label(), "Allow safely");
@@ -370,16 +379,15 @@ mod tests {
         assert!(preview.is_some());
         assert!(preview.unwrap().text.contains("git diff"));
 
-        let safer =
-            get_suggestion_by_kind("core.git:reset-hard", SuggestionKind::SaferAlternative);
+        let safer = get_suggestion_by_kind("core.git:reset-hard", SuggestionKind::SaferAlternative);
         assert!(safer.is_some());
         assert!(safer.unwrap().text.contains("soft"));
     }
 
     #[test]
     fn suggestions_serialize_to_json() {
-        let suggestion = Suggestion::new(SuggestionKind::PreviewFirst, "Test")
-            .with_command("git status");
+        let suggestion =
+            Suggestion::new(SuggestionKind::PreviewFirst, "Test").with_command("git status");
 
         let json = serde_json::to_string(&suggestion).unwrap();
         assert!(json.contains("\"kind\":\"preview_first\""));

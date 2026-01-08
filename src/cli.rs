@@ -84,6 +84,26 @@ pub enum Command {
         /// Additional packs to enable for this test
         #[arg(long, value_delimiter = ',')]
         with_packs: Option<Vec<String>>,
+
+        /// Enable heredoc/inline-script scanning (overrides config)
+        #[arg(long = "heredoc-scan", conflicts_with = "no_heredoc_scan")]
+        heredoc_scan: bool,
+
+        /// Disable heredoc/inline-script scanning (overrides config)
+        #[arg(long = "no-heredoc-scan", conflicts_with = "heredoc_scan")]
+        no_heredoc_scan: bool,
+
+        /// Timeout budget for heredoc extraction (milliseconds)
+        #[arg(long = "heredoc-timeout", value_name = "MS")]
+        heredoc_timeout_ms: Option<u64>,
+
+        /// Languages to scan (comma-separated). Example: python,bash,javascript
+        #[arg(
+            long = "heredoc-languages",
+            value_delimiter = ',',
+            value_name = "LANGS"
+        )]
+        heredoc_languages: Option<Vec<String>>,
     },
 
     /// Generate a sample configuration file
@@ -131,8 +151,20 @@ pub fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::TestCommand {
             command,
             with_packs,
+            heredoc_scan,
+            no_heredoc_scan,
+            heredoc_timeout_ms,
+            heredoc_languages,
         }) => {
-            test_command(&config, &command, with_packs);
+            test_command(
+                &config,
+                &command,
+                with_packs,
+                heredoc_scan,
+                no_heredoc_scan,
+                heredoc_timeout_ms,
+                heredoc_languages,
+            );
         }
         Some(Command::Init { output, force }) => {
             init_config(output, force)?;
@@ -241,9 +273,17 @@ fn pack_info(pack_id: &str, show_patterns: bool) -> Result<(), Box<dyn std::erro
 /// 4. Command normalization
 /// 5. Pack pattern matching
 #[allow(clippy::needless_pass_by_value)] // Value is consumed from CLI args
-fn test_command(config: &Config, command: &str, extra_packs: Option<Vec<String>>) {
+fn test_command(
+    config: &Config,
+    command: &str,
+    extra_packs: Option<Vec<String>>,
+    heredoc_scan: bool,
+    no_heredoc_scan: bool,
+    heredoc_timeout_ms: Option<u64>,
+    heredoc_languages: Option<Vec<String>>,
+) {
     // Build effective config with extra packs if specified
-    let effective_config = extra_packs.map_or_else(
+    let mut effective_config = extra_packs.map_or_else(
         || config.clone(),
         |packs| {
             let mut modified = config.clone();
@@ -252,10 +292,25 @@ fn test_command(config: &Config, command: &str, extra_packs: Option<Vec<String>>
         },
     );
 
+    // CLI overrides for heredoc scanning (higher priority than env/config file).
+    if heredoc_scan {
+        effective_config.heredoc.enabled = Some(true);
+    }
+    if no_heredoc_scan {
+        effective_config.heredoc.enabled = Some(false);
+    }
+    if let Some(timeout_ms) = heredoc_timeout_ms {
+        effective_config.heredoc.timeout_ms = Some(timeout_ms);
+    }
+    if let Some(langs) = heredoc_languages {
+        effective_config.heredoc.languages = Some(langs);
+    }
+
     // Get enabled packs and collect keywords for quick rejection
     let enabled_packs = effective_config.enabled_pack_ids();
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
+    let heredoc_settings = effective_config.heredoc_settings();
 
     // Compile overrides once (not per-command)
     let compiled_overrides = effective_config.overrides.compile();
@@ -271,6 +326,7 @@ fn test_command(config: &Config, command: &str, extra_packs: Option<Vec<String>>
         &ordered_packs,
         &compiled_overrides,
         &allowlists,
+        &heredoc_settings,
     );
 
     println!("Command: {command}");
@@ -356,6 +412,39 @@ fn show_config(config: &Config) {
     println!("Disabled packs:");
     for pack in &config.packs.disabled {
         println!("  - {pack}");
+    }
+    println!();
+
+    let heredoc = config.heredoc_settings();
+    println!("Heredoc scanning:");
+    println!("  Enabled: {}", heredoc.enabled);
+    println!("  Timeout (ms): {}", heredoc.limits.timeout_ms);
+    println!("  Max body bytes: {}", heredoc.limits.max_body_bytes);
+    println!("  Max body lines: {}", heredoc.limits.max_body_lines);
+    println!("  Max heredocs: {}", heredoc.limits.max_heredocs);
+    println!(
+        "  Fail-open on parse error: {}",
+        heredoc.fallback_on_parse_error
+    );
+    println!("  Fail-open on timeout: {}", heredoc.fallback_on_timeout);
+
+    let lang_label = |lang: crate::heredoc::ScriptLanguage| -> &'static str {
+        match lang {
+            crate::heredoc::ScriptLanguage::Bash => "bash",
+            crate::heredoc::ScriptLanguage::Python => "python",
+            crate::heredoc::ScriptLanguage::Ruby => "ruby",
+            crate::heredoc::ScriptLanguage::Perl => "perl",
+            crate::heredoc::ScriptLanguage::JavaScript => "javascript",
+            crate::heredoc::ScriptLanguage::TypeScript => "typescript",
+            crate::heredoc::ScriptLanguage::Unknown => "unknown",
+        }
+    };
+
+    if let Some(langs) = &heredoc.allowed_languages {
+        let langs = langs.iter().copied().map(lang_label).collect::<Vec<_>>();
+        println!("  Languages: {}", langs.join(","));
+    } else {
+        println!("  Languages: all");
     }
 }
 
