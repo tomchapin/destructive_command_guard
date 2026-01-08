@@ -60,6 +60,9 @@ const MAX_PREVIEW_CHARS: usize = 80;
 ///
 /// The preview is truncated to `MAX_PREVIEW_CHARS` characters if too long,
 /// with "..." appended to indicate truncation.
+///
+/// If the byte offsets fall in the middle of a multi-byte UTF-8 character,
+/// we snap to the nearest valid character boundary to avoid panics.
 fn extract_match_preview(command: &str, span: &MatchSpan) -> String {
     // Ensure byte offsets are within bounds
     let start = span.start.min(command.len());
@@ -69,8 +72,33 @@ fn extract_match_preview(command: &str, span: &MatchSpan) -> String {
         return String::new();
     }
 
-    // Extract the matched slice (might not be valid UTF-8 at boundaries)
-    let matched = &command[start..end];
+    // Snap to valid UTF-8 character boundaries to avoid panics.
+    // If start is not at a boundary, move forward to the next boundary.
+    // If end is not at a boundary, move backward to the previous boundary.
+    let safe_start = if command.is_char_boundary(start) {
+        start
+    } else {
+        // Find the next character boundary
+        (start + 1..=command.len())
+            .find(|&i| command.is_char_boundary(i))
+            .unwrap_or(command.len())
+    };
+
+    let safe_end = if command.is_char_boundary(end) {
+        end
+    } else {
+        // Find the previous character boundary
+        (0..end)
+            .rfind(|&i| command.is_char_boundary(i))
+            .unwrap_or(0)
+    };
+
+    if safe_start >= safe_end {
+        return String::new();
+    }
+
+    // Now safe to slice (boundaries are guaranteed valid)
+    let matched = &command[safe_start..safe_end];
 
     // Truncate to MAX_PREVIEW_CHARS characters (UTF-8 safe)
     truncate_preview(matched, MAX_PREVIEW_CHARS)
@@ -1728,6 +1756,36 @@ mod tests {
             end: 50,
         };
         assert_eq!(super::extract_match_preview(cmd, &span_invalid), "");
+    }
+
+    #[test]
+    fn extract_match_preview_handles_invalid_utf8_boundaries() {
+        // Multi-byte UTF-8: "日本" is 6 bytes (3 bytes per character)
+        let cmd = "日本語"; // 9 bytes, 3 characters
+
+        // Valid boundaries (0, 3, 6, 9 are all valid)
+        let valid_span = super::MatchSpan { start: 0, end: 3 };
+        assert_eq!(super::extract_match_preview(cmd, &valid_span), "日");
+
+        // Invalid start boundary (byte 1 is middle of first char)
+        // Should snap forward to byte 3 (start of second char)
+        let invalid_start = super::MatchSpan { start: 1, end: 6 };
+        assert_eq!(super::extract_match_preview(cmd, &invalid_start), "本");
+
+        // Invalid end boundary (byte 4 is middle of second char)
+        // Should snap backward to byte 3 (end of first char)
+        let invalid_end = super::MatchSpan { start: 0, end: 4 };
+        assert_eq!(super::extract_match_preview(cmd, &invalid_end), "日");
+
+        // Both boundaries invalid - should still not panic
+        let both_invalid = super::MatchSpan { start: 1, end: 4 };
+        // start snaps to 3, end snaps to 3, so start >= end -> empty
+        assert_eq!(super::extract_match_preview(cmd, &both_invalid), "");
+
+        // Span entirely within a character (start=1, end=2)
+        // Both snap to boundaries, resulting in empty
+        let within_char = super::MatchSpan { start: 1, end: 2 };
+        assert_eq!(super::extract_match_preview(cmd, &within_char), "");
     }
 
     #[test]
