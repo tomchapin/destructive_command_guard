@@ -485,7 +485,7 @@ impl ContextClassifier {
 
         // Check if it's an inline-code command (or ends with one after a path)
         let base_name = word.rsplit('/').next().unwrap_or(word);
-        self.inline_code_commands.iter().any(|&cmd| base_name == cmd)
+        self.inline_code_commands.contains(&base_name)
     }
 }
 
@@ -652,7 +652,7 @@ mod tests {
         let spans = classify_command(cmd);
 
         // Should handle escaped quotes correctly
-        assert!(spans.spans().len() >= 1);
+        assert!(!spans.spans().is_empty());
     }
 
     #[test]
@@ -727,7 +727,7 @@ mod tests {
     fn test_whitespace_only() {
         let spans = classify_command("   ");
         // Should have one Executed span (conservative)
-        assert!(spans.spans().len() >= 1);
+        assert!(!spans.spans().is_empty());
     }
 
     #[test]
