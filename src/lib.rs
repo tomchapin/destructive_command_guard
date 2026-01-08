@@ -52,6 +52,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod context;
 pub mod evaluator;
 pub mod hook;
 pub mod packs;
@@ -64,3 +65,6 @@ pub use evaluator::{
 };
 pub use hook::{HookInput, HookOutput, HookResult, HookSpecificOutput};
 pub use packs::{Pack, PackId, PackRegistry};
+
+// Re-export context types
+pub use context::{classify_command, CommandSpans, ContextClassifier, Span, SpanKind};

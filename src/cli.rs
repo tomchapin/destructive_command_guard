@@ -6,6 +6,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::config::Config;
+use crate::evaluator::{evaluate_command, EvaluationDecision, MatchSource};
 use crate::packs::REGISTRY;
 
 /// High-performance Claude Code hook for blocking destructive commands.
@@ -230,28 +231,57 @@ fn pack_info(pack_id: &str, show_patterns: bool) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// Test a command against the configured packs
+/// Test a command against the configured packs using the shared evaluator.
+///
+/// This ensures parity with hook mode by using the same evaluation logic:
+/// 1. Config allow overrides
+/// 2. Config block overrides
+/// 3. Quick rejection (keyword filtering)
+/// 4. Command normalization
+/// 5. Pack pattern matching
 fn test_command(config: &Config, command: &str, extra_packs: Option<Vec<String>>) {
-    let mut enabled = config.enabled_pack_ids();
+    // Build effective config with extra packs if specified
+    let effective_config = if let Some(ref packs) = extra_packs {
+        let mut modified = config.clone();
+        modified.packs.enabled.extend(packs.iter().cloned());
+        modified
+    } else {
+        config.clone()
+    };
 
-    // Add extra packs if specified
-    if let Some(packs) = extra_packs {
-        for pack in packs {
-            enabled.insert(pack);
-        }
-    }
+    // Get enabled packs and collect keywords for quick rejection
+    let enabled_packs = effective_config.enabled_pack_ids();
+    let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
+    let keywords: Vec<&str> = enabled_keywords.iter().copied().collect();
 
-    let result = REGISTRY.check_command(command, &enabled);
+    // Use shared evaluator for consistent behavior with hook mode
+    let result = evaluate_command(command, &effective_config, &keywords);
 
     println!("Command: {command}");
     println!();
 
-    if result.blocked {
-        println!("Result: BLOCKED");
-        println!("Pack: {}", result.pack_id.as_deref().unwrap_or("unknown"));
-        println!("Reason: {}", result.reason.as_deref().unwrap_or("unknown"));
-    } else {
-        println!("Result: ALLOWED");
+    match result.decision {
+        EvaluationDecision::Allow => {
+            println!("Result: ALLOWED");
+        }
+        EvaluationDecision::Deny => {
+            println!("Result: BLOCKED");
+            if let Some(ref info) = result.pattern_info {
+                if let Some(ref pack_id) = info.pack_id {
+                    println!("Pack: {pack_id}");
+                }
+                if let Some(ref pattern_name) = info.pattern_name {
+                    println!("Pattern: {pattern_name}");
+                }
+                println!("Reason: {}", info.reason);
+                let source = match info.source {
+                    MatchSource::ConfigOverride => "config override",
+                    MatchSource::LegacyPattern => "legacy pattern",
+                    MatchSource::Pack => "pack",
+                };
+                println!("Source: {source}");
+            }
+        }
     }
 }
 
