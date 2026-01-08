@@ -391,6 +391,15 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 None,
             ),
             CompiledPattern::new(
+                "pathlib.Path($$$).rmdir($$$)".to_string(),
+                "heredoc.python.pathlib_rmdir".to_string(),
+                "Path.rmdir() deletes directories".to_string(),
+                Severity::High,
+                None,
+            ),
+            // Shell execution patterns - Medium severity to avoid false positives
+            // per bead guidance: "Do not block on shell=True alone"
+            CompiledPattern::new(
                 "subprocess.run($$$)".to_string(),
                 "heredoc.python.subprocess_run".to_string(),
                 "subprocess.run() executes shell commands".to_string(),
@@ -398,11 +407,32 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 Some("Validate command arguments carefully".to_string()),
             ),
             CompiledPattern::new(
+                "subprocess.call($$$)".to_string(),
+                "heredoc.python.subprocess_call".to_string(),
+                "subprocess.call() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "subprocess.Popen($$$)".to_string(),
+                "heredoc.python.subprocess_popen".to_string(),
+                "subprocess.Popen() spawns shell processes".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
                 "os.system($$$)".to_string(),
                 "heredoc.python.os_system".to_string(),
                 "os.system() executes shell commands".to_string(),
-                Severity::High,
+                Severity::Medium, // Lowered per bead: avoid "code execution exists" as default deny
                 Some("Use subprocess with explicit arguments instead".to_string()),
+            ),
+            CompiledPattern::new(
+                "os.popen($$$)".to_string(),
+                "heredoc.python.os_popen".to_string(),
+                "os.popen() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Use subprocess instead".to_string()),
             ),
         ],
     );
