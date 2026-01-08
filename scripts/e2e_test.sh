@@ -490,8 +490,8 @@ test_command 'bash -c "rm -rf /"' "block" "bash -c executes rm -rf /"
 test_command 'echo hi | bash -c "rm -rf /"' "block" "pipe to bash -c executes rm -rf /"
 test_command "python -c \"import os; os.system('rm -rf /')\"" "block" "python -c executes rm -rf /"
 test_command "node -e \"require('child_process').execSync('rm -rf /')\"" "block" "node -e executes rm -rf /"
-test_command 'echo $(rm -rf /tmp/foo)' "block" "command substitution executes rm -rf"
-test_command 'echo `rm -rf /tmp/foo`' "block" "backticks substitution executes rm -rf"
+test_command 'echo $(rm -rf /home/user)' "block" "command substitution executes rm -rf"
+test_command 'echo `rm -rf /home/user`' "block" "backticks substitution executes rm -rf"
 
 # Edge cases: wrappers/prefixes
 test_command 'sudo git commit -m "Fix rm -rf detection"' "allow" "sudo git commit -m contains rm -rf (data context)"
