@@ -479,16 +479,31 @@ mod tests {
     fn test_colorful_warning_utf8_truncation_does_not_panic() {
         // Test with multi-byte UTF-8 characters that would panic with byte slicing
         // Chinese characters: each is 3 bytes in UTF-8
-        let long_chinese = "rm -rf /home/用户/文件夹/子文件夹/另一个文件夹/更多内容/最终目录";
-        // This is >50 chars and would panic at byte 47 with naive slicing
+        // 60+ characters to trigger truncation (limit is 50 chars)
+        let long_chinese = "rm -rf /home/用户/文件夹/子文件夹/另一个文件夹/更多更多内容/最终最终目录/深层嵌套/额外路径";
+        assert!(
+            long_chinese.chars().count() > 50,
+            "Chinese test string must be >50 chars, got {}",
+            long_chinese.chars().count()
+        );
         print_colorful_warning(long_chinese, "test reason", Some("test.pack"));
 
-        // Japanese characters
-        let long_japanese = "rm -rf /home/ユーザー/ドキュメント/フォルダ/サブフォルダ/ファイル";
+        // Japanese characters - also >50 chars
+        let long_japanese = "rm -rf /home/ユーザー/ドキュメント/フォルダ/サブフォルダ/ファイル/もっとフォルダ/最後/追加パス";
+        assert!(
+            long_japanese.chars().count() > 50,
+            "Japanese test string must be >50 chars, got {}",
+            long_japanese.chars().count()
+        );
         print_colorful_warning(long_japanese, "test reason", None);
 
-        // Mixed ASCII and emoji (emoji are 4 bytes)
-        let long_emoji = "echo 🎉🎊🎈🎁🎀🎄🎃🎂🎆🎇🧨✨🎍🎎🎏🎐🎑🧧🎀🎁🎗🎟🎫🎖🏆🏅🥇🥈🥉⚽️";
+        // Mixed ASCII and emoji (emoji are 4 bytes) - >50 chars
+        let long_emoji = "echo 🎉🎊🎈🎁🎀🎄🎃🎂🎆🎇🧨✨🎍🎎🎏🎐🎑🧧🎀🎁🎗🎟🎫🎖🏆🏅🥇🥈🥉⚽️🏀🏈⚾️🥎🎾🏐🏉🥏🎱🪀🏓🏸🥊🥋";
+        assert!(
+            long_emoji.chars().count() > 50,
+            "Emoji test string must be >50 chars, got {}",
+            long_emoji.chars().count()
+        );
         print_colorful_warning(long_emoji, "test reason", Some("emoji.pack"));
     }
 }
