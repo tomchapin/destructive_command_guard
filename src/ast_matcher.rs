@@ -780,7 +780,8 @@ mod tests {
         // Test with CJK characters (3 bytes each)
         let cjk = "你好世界";
         assert_eq!(truncate_preview(cjk, 10), cjk); // 4 chars, fits
-        assert_eq!(truncate_preview(cjk, 4), "你..."); // truncates to 1 char + ...
+        assert_eq!(truncate_preview(cjk, 4), cjk); // exactly 4 chars, fits
+        assert_eq!(truncate_preview(cjk, 3), "..."); // 4 > 3, truncates (no room for even 1 char + "...")
 
         // Edge cases
         assert_eq!(truncate_preview("", 10), "");
