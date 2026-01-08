@@ -35,6 +35,7 @@ use crate::heredoc::ScriptLanguage;
 use ast_grep_core::{AstGrep, Pattern};
 use ast_grep_language::SupportLang;
 use memchr::memchr_iter;
+use regex::Regex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -248,6 +249,11 @@ impl AstMatcher {
             budget_ms,
         };
 
+        // Perl is not supported by ast-grep-language; use a conservative regex fallback.
+        if language == ScriptLanguage::Perl {
+            return find_matches_perl(code, start_time, self.timeout, budget_ms);
+        }
+
         // Check language support FIRST (before patterns, so we report unsupported properly)
         let Some(ast_lang) = script_language_to_ast_lang(language) else {
             return Err(MatchError::UnsupportedLanguage(language));
@@ -347,6 +353,571 @@ const fn script_language_to_ast_lang(lang: ScriptLanguage) -> Option<SupportLang
         ScriptLanguage::Bash => Some(SupportLang::Bash),
         ScriptLanguage::Perl | ScriptLanguage::Unknown => None,
     }
+}
+
+// ============================================================================
+// Perl regex fallback matcher (git_safety_guard-2d4)
+// ============================================================================
+
+static PERL_SYSTEM_EXEC_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches:
+    // - system("...") / system '...'
+    // - exec("...")   / exec '...'
+    //
+    // We intentionally only match *simple single-line* string literals to keep signal high.
+    Regex::new(
+        r#"(?m)\b(?P<call>system|exec)\b(?:\s*\(\s*|\s+)(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#,
+    )
+    .expect("perl system/exec literal regex compiles")
+});
+
+static PERL_BACKTICKS_LITERAL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)`(?P<cmd>[^`\n]*)`").expect("perl backticks regex compiles"));
+
+static PERL_QX_SLASH_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches qx/.../ (slash delimiter only, v1).
+    Regex::new(r"(?m)\bqx\s*/(?P<cmd>(?:\\.|[^/\n])*)/").expect("perl qx// regex compiles")
+});
+
+static PERL_FILE_PATH_RMTREE_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?m)\bFile::Path::(?P<fn>rmtree|remove_tree)\b(?:\s*\(\s*|\s+)(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#,
+    )
+    .expect("perl File::Path rmtree/remove_tree regex compiles")
+});
+
+static PERL_UNLINK_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)\bunlink\b(?:\s*\(\s*|\s+)(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#)
+        .expect("perl unlink regex compiles")
+});
+
+static PERL_RMDIR_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)\brmdir\b(?:\s*\(\s*|\s+)(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#)
+        .expect("perl rmdir regex compiles")
+});
+
+static PERL_RM_RF_TARGET: LazyLock<Regex> = LazyLock::new(|| {
+    // Extracts a target token for common rm -rf flag orders.
+    // This is heuristic and intentionally does not attempt to fully parse shell.
+    Regex::new(
+        r"\brm\b\s+-[A-Za-z]*[rR][A-Za-z]*f[A-Za-z]*\s+(?P<t1>\S+)|\brm\b\s+-[A-Za-z]*f[A-Za-z]*[rR][A-Za-z]*\s+(?P<t2>\S+)",
+    )
+    .expect("rm -rf target regex compiles")
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PerlShellCall {
+    System,
+    Exec,
+    Backticks,
+    Qx,
+}
+
+impl PerlShellCall {
+    #[must_use]
+    const fn id_prefix(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Exec => "exec",
+            Self::Backticks => "backticks",
+            Self::Qx => "qx",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PerlCommentState {
+    Normal,
+    Single,
+    Double,
+    Backtick,
+}
+
+fn find_matches_perl(
+    code: &str,
+    start_time: Instant,
+    timeout: Duration,
+    budget_ms: u64,
+) -> Result<Vec<PatternMatch>, MatchError> {
+    let newline_positions: Vec<usize> = memchr_iter(b'\n', code.as_bytes()).collect();
+    let masked = mask_perl_comments(code);
+    let haystack = masked.as_ref();
+
+    let mut matches = Vec::new();
+
+    scan_perl_system_exec(
+        &mut matches,
+        code,
+        haystack,
+        &newline_positions,
+        start_time,
+        timeout,
+        budget_ms,
+    )?;
+    scan_perl_backticks(
+        &mut matches,
+        code,
+        haystack,
+        &newline_positions,
+        start_time,
+        timeout,
+        budget_ms,
+    )?;
+    scan_perl_qx(
+        &mut matches,
+        code,
+        haystack,
+        &newline_positions,
+        start_time,
+        timeout,
+        budget_ms,
+    )?;
+    scan_perl_file_path(
+        &mut matches,
+        code,
+        haystack,
+        &newline_positions,
+        start_time,
+        timeout,
+        budget_ms,
+    )?;
+    scan_perl_unlink_rmdir(
+        &mut matches,
+        code,
+        haystack,
+        &newline_positions,
+        start_time,
+        timeout,
+        budget_ms,
+    )?;
+
+    Ok(matches)
+}
+
+#[inline]
+fn perl_check_timeout(
+    start_time: Instant,
+    timeout: Duration,
+    budget_ms: u64,
+) -> Result<(), MatchError> {
+    if start_time.elapsed() > timeout {
+        let elapsed_ms = u64::try_from(start_time.elapsed().as_millis()).unwrap_or(u64::MAX);
+        return Err(MatchError::Timeout {
+            elapsed_ms,
+            budget_ms,
+        });
+    }
+    Ok(())
+}
+
+fn scan_perl_system_exec(
+    out: &mut Vec<PatternMatch>,
+    code: &str,
+    haystack: &str,
+    newline_positions: &[usize],
+    start_time: Instant,
+    timeout: Duration,
+    budget_ms: u64,
+) -> Result<(), MatchError> {
+    for caps in PERL_SYSTEM_EXEC_LITERAL.captures_iter(haystack) {
+        perl_check_timeout(start_time, timeout, budget_ms)?;
+        let Some(m) = caps.get(0) else {
+            continue;
+        };
+
+        let call = caps.name("call").map_or("", |m| m.as_str());
+        let call = match call {
+            "system" => PerlShellCall::System,
+            "exec" => PerlShellCall::Exec,
+            _ => continue,
+        };
+
+        let Some(payload) = perl_string_literal_from_caps(&caps) else {
+            continue;
+        };
+
+        push_perl_shell_payload_match(
+            out,
+            code,
+            newline_positions,
+            call,
+            payload,
+            m.start(),
+            m.end(),
+        );
+    }
+
+    Ok(())
+}
+
+fn scan_perl_backticks(
+    out: &mut Vec<PatternMatch>,
+    code: &str,
+    haystack: &str,
+    newline_positions: &[usize],
+    start_time: Instant,
+    timeout: Duration,
+    budget_ms: u64,
+) -> Result<(), MatchError> {
+    for caps in PERL_BACKTICKS_LITERAL.captures_iter(haystack) {
+        perl_check_timeout(start_time, timeout, budget_ms)?;
+        let Some(m) = caps.get(0) else {
+            continue;
+        };
+        let Some(payload) = caps.name("cmd").map(|m| m.as_str()) else {
+            continue;
+        };
+
+        push_perl_shell_payload_match(
+            out,
+            code,
+            newline_positions,
+            PerlShellCall::Backticks,
+            payload,
+            m.start(),
+            m.end(),
+        );
+    }
+
+    Ok(())
+}
+
+fn scan_perl_qx(
+    out: &mut Vec<PatternMatch>,
+    code: &str,
+    haystack: &str,
+    newline_positions: &[usize],
+    start_time: Instant,
+    timeout: Duration,
+    budget_ms: u64,
+) -> Result<(), MatchError> {
+    for caps in PERL_QX_SLASH_LITERAL.captures_iter(haystack) {
+        perl_check_timeout(start_time, timeout, budget_ms)?;
+        let Some(m) = caps.get(0) else {
+            continue;
+        };
+        let Some(payload) = caps.name("cmd").map(|m| m.as_str()) else {
+            continue;
+        };
+
+        push_perl_shell_payload_match(
+            out,
+            code,
+            newline_positions,
+            PerlShellCall::Qx,
+            unescape_perl_qx_payload(payload).as_ref(),
+            m.start(),
+            m.end(),
+        );
+    }
+
+    Ok(())
+}
+
+fn unescape_perl_qx_payload(payload: &str) -> std::borrow::Cow<'_, str> {
+    if payload.contains("\\/") {
+        return std::borrow::Cow::Owned(payload.replace("\\/", "/"));
+    }
+    std::borrow::Cow::Borrowed(payload)
+}
+
+fn scan_perl_file_path(
+    out: &mut Vec<PatternMatch>,
+    code: &str,
+    haystack: &str,
+    newline_positions: &[usize],
+    start_time: Instant,
+    timeout: Duration,
+    budget_ms: u64,
+) -> Result<(), MatchError> {
+    for caps in PERL_FILE_PATH_RMTREE_LITERAL.captures_iter(haystack) {
+        perl_check_timeout(start_time, timeout, budget_ms)?;
+        let Some(m) = caps.get(0) else {
+            continue;
+        };
+        let Some(path) = perl_string_literal_from_caps(&caps) else {
+            continue;
+        };
+        let fn_name = caps.name("fn").map_or("rmtree", |m| m.as_str());
+
+        let severity = if is_catastrophic_path(path) {
+            Severity::Critical
+        } else {
+            Severity::Medium
+        };
+
+        let rule_id = format!("heredoc.perl.file_path.{fn_name}");
+        let reason = format!("File::Path::{fn_name}() recursively deletes directories");
+
+        push_regex_match(
+            out,
+            code,
+            newline_positions,
+            &rule_id,
+            &reason,
+            severity,
+            Some("Verify target path carefully before running".to_string()),
+            m.start(),
+            m.end(),
+        );
+    }
+
+    Ok(())
+}
+
+fn scan_perl_unlink_rmdir(
+    out: &mut Vec<PatternMatch>,
+    code: &str,
+    haystack: &str,
+    newline_positions: &[usize],
+    start_time: Instant,
+    timeout: Duration,
+    budget_ms: u64,
+) -> Result<(), MatchError> {
+    for caps in PERL_UNLINK_LITERAL.captures_iter(haystack) {
+        perl_check_timeout(start_time, timeout, budget_ms)?;
+        let Some(m) = caps.get(0) else {
+            continue;
+        };
+        // Only match string-literal unlink; severity is warn-only by default.
+        push_regex_match(
+            out,
+            code,
+            newline_positions,
+            "heredoc.perl.unlink",
+            "unlink() deletes files",
+            Severity::Low,
+            None,
+            m.start(),
+            m.end(),
+        );
+    }
+
+    for caps in PERL_RMDIR_LITERAL.captures_iter(haystack) {
+        perl_check_timeout(start_time, timeout, budget_ms)?;
+        let Some(m) = caps.get(0) else {
+            continue;
+        };
+        push_regex_match(
+            out,
+            code,
+            newline_positions,
+            "heredoc.perl.rmdir",
+            "rmdir() deletes directories",
+            Severity::Low,
+            None,
+            m.start(),
+            m.end(),
+        );
+    }
+
+    Ok(())
+}
+
+fn mask_perl_comments(code: &str) -> std::borrow::Cow<'_, str> {
+    if !code.as_bytes().contains(&b'#') {
+        return std::borrow::Cow::Borrowed(code);
+    }
+
+    let mut out = code.as_bytes().to_vec();
+    let mut state = PerlCommentState::Normal;
+    let mut i = 0usize;
+
+    while i < out.len() {
+        match state {
+            PerlCommentState::Normal => match out[i] {
+                b'#' => {
+                    // Mask until newline (keep newline itself).
+                    let start = i;
+                    while i < out.len() && out[i] != b'\n' {
+                        i += 1;
+                    }
+                    for b in &mut out[start..i] {
+                        *b = b' ';
+                    }
+                }
+                b'\'' => {
+                    state = PerlCommentState::Single;
+                    i += 1;
+                }
+                b'"' => {
+                    state = PerlCommentState::Double;
+                    i += 1;
+                }
+                b'`' => {
+                    state = PerlCommentState::Backtick;
+                    i += 1;
+                }
+                _ => i += 1,
+            },
+            PerlCommentState::Single => {
+                if out[i] == b'\\' {
+                    i = (i + 2).min(out.len());
+                    continue;
+                }
+                if out[i] == b'\'' {
+                    state = PerlCommentState::Normal;
+                }
+                i += 1;
+            }
+            PerlCommentState::Double => {
+                if out[i] == b'\\' {
+                    i = (i + 2).min(out.len());
+                    continue;
+                }
+                if out[i] == b'"' {
+                    state = PerlCommentState::Normal;
+                }
+                i += 1;
+            }
+            PerlCommentState::Backtick => {
+                if out[i] == b'\\' {
+                    i = (i + 2).min(out.len());
+                    continue;
+                }
+                if out[i] == b'`' {
+                    state = PerlCommentState::Normal;
+                }
+                i += 1;
+            }
+        }
+    }
+
+    String::from_utf8(out).map_or(std::borrow::Cow::Borrowed(code), std::borrow::Cow::Owned)
+}
+
+fn perl_string_literal_from_caps<'a>(caps: &'a regex::Captures<'a>) -> Option<&'a str> {
+    caps.name("dq")
+        .or_else(|| caps.name("sq"))
+        .map(|m| m.as_str())
+}
+
+fn push_perl_shell_payload_match(
+    out: &mut Vec<PatternMatch>,
+    code: &str,
+    newline_positions: &[usize],
+    call: PerlShellCall,
+    payload: &str,
+    start: usize,
+    end: usize,
+) {
+    let Some(hit) = detect_perl_shell_payload(payload) else {
+        return;
+    };
+
+    let rule_id = format!("heredoc.perl.{}.{}", call.id_prefix(), hit.rule_suffix);
+    push_regex_match(
+        out,
+        code,
+        newline_positions,
+        &rule_id,
+        hit.reason,
+        hit.severity,
+        hit.suggestion.map(str::to_string),
+        start,
+        end,
+    );
+}
+
+struct PerlShellHit {
+    rule_suffix: &'static str,
+    reason: &'static str,
+    severity: Severity,
+    suggestion: Option<&'static str>,
+}
+
+fn detect_perl_shell_payload(payload: &str) -> Option<PerlShellHit> {
+    let payload = payload.trim();
+
+    if payload.contains("git reset --hard") {
+        return Some(PerlShellHit {
+            rule_suffix: "git_reset_hard",
+            reason: "git reset --hard destroys uncommitted changes",
+            severity: Severity::High,
+            suggestion: Some("Use 'git stash' first, or prefer safer alternatives"),
+        });
+    }
+
+    if payload.contains("git clean -fd") || payload.contains("git clean -df") {
+        return Some(PerlShellHit {
+            rule_suffix: "git_clean_fd",
+            reason: "git clean -fd permanently deletes untracked files",
+            severity: Severity::High,
+            suggestion: Some("Use 'git clean -n' first to preview deletions"),
+        });
+    }
+
+    let target = first_rm_rf_target(payload)?;
+
+    let catastrophic = is_catastrophic_path(clean_path_token(target));
+    let severity = if catastrophic {
+        Severity::Critical
+    } else {
+        Severity::Medium
+    };
+
+    Some(PerlShellHit {
+        rule_suffix: "rm_rf",
+        reason: "rm -rf recursively deletes files/directories",
+        severity,
+        suggestion: Some("Verify the target path and use safer alternatives when possible"),
+    })
+}
+
+fn first_rm_rf_target(cmd: &str) -> Option<&str> {
+    let caps = PERL_RM_RF_TARGET.captures(cmd)?;
+    caps.name("t1")
+        .or_else(|| caps.name("t2"))
+        .map(|m| m.as_str())
+}
+
+fn clean_path_token(token: &str) -> &str {
+    let token = token.trim_matches(|c: char| c == '"' || c == '\'');
+    token.trim_end_matches(&[';', ',', ')', ']', '}'][..])
+}
+
+fn is_catastrophic_path(path: &str) -> bool {
+    if matches!(path, "/" | "~") || path.starts_with("~/") {
+        return true;
+    }
+    if path.starts_with("/tmp") || path.starts_with("/var/tmp") {
+        return false;
+    }
+    path.starts_with("/etc")
+        || path.starts_with("/home")
+        || path.starts_with("/usr")
+        || path.starts_with("/bin")
+        || path.starts_with("/sbin")
+        || path.starts_with("/lib")
+        || path.starts_with("/lib64")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_regex_match(
+    out: &mut Vec<PatternMatch>,
+    code: &str,
+    newline_positions: &[usize],
+    rule_id: &str,
+    reason: &str,
+    severity: Severity,
+    suggestion: Option<String>,
+    start: usize,
+    end: usize,
+) {
+    let line_number = newline_positions.partition_point(|&idx| idx < start) + 1;
+    let matched_text = code.get(start..end).unwrap_or("");
+    let preview = truncate_preview(matched_text, 60);
+
+    out.push(PatternMatch {
+        rule_id: rule_id.to_string(),
+        reason: reason.to_string(),
+        matched_text_preview: preview,
+        start,
+        end,
+        line_number,
+        severity,
+        suggestion,
+    });
 }
 
 /// Default patterns for heredoc scanning.
@@ -876,15 +1447,6 @@ mod tests {
         let matcher = AstMatcher::new();
         let code = "print 'hello perl';";
 
-        let result = matcher.find_matches(code, ScriptLanguage::Perl);
-        assert!(matches!(result, Err(MatchError::UnsupportedLanguage(_))));
-    }
-
-    #[test]
-    fn unknown_language_returns_error() {
-        let matcher = AstMatcher::new();
-        let code = "some code";
-
         let result = matcher.find_matches(code, ScriptLanguage::Unknown);
         assert!(matches!(result, Err(MatchError::UnsupportedLanguage(_))));
     }
@@ -913,9 +1475,118 @@ mod tests {
         let matcher = AstMatcher::new();
         let code = "some perl code";
 
-        // Perl is unsupported - should fail open (return None, not panic)
-        let result = matcher.has_blocking_match(code, ScriptLanguage::Perl);
+        // Unknown is unsupported - should fail open (return None, not panic)
+        let result = matcher.has_blocking_match(code, ScriptLanguage::Unknown);
         assert!(result.is_none());
+    }
+
+    mod perl_positive_fixtures {
+        use super::*;
+
+        #[test]
+        fn perl_system_rm_rf_catastrophic_blocks() {
+            let matcher = AstMatcher::new();
+            let code = "system(\"rm -rf /\");\n";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::Perl)
+                .expect("perl matcher should run");
+            assert!(!matches.is_empty());
+            assert!(matches[0].rule_id.contains("rm_rf"));
+            assert!(matches[0].severity.blocks_by_default());
+        }
+
+        #[test]
+        fn perl_system_rm_rf_non_catastrophic_warns_only() {
+            let matcher = AstMatcher::new();
+            let code = "system('rm -rf ./build');\n";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::Perl)
+                .expect("perl matcher should run");
+            assert!(!matches.is_empty());
+            assert!(matches[0].rule_id.contains("rm_rf"));
+            assert!(!matches[0].severity.blocks_by_default());
+        }
+
+        #[test]
+        fn perl_backticks_git_reset_hard_blocks() {
+            let matcher = AstMatcher::new();
+            let code = "`git reset --hard`;\n";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::Perl)
+                .expect("perl matcher should run");
+            assert!(!matches.is_empty());
+            assert!(matches[0].rule_id.contains("git_reset_hard"));
+            assert!(matches[0].severity.blocks_by_default());
+        }
+
+        #[test]
+        fn perl_qx_rm_rf_catastrophic_blocks() {
+            let matcher = AstMatcher::new();
+            let code = "qx/rm -rf \\/etc/;\n";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::Perl)
+                .expect("perl matcher should run");
+            assert!(!matches.is_empty());
+            assert!(matches[0].rule_id.contains("rm_rf"));
+            assert!(matches[0].severity.blocks_by_default());
+        }
+
+        #[test]
+        fn perl_file_path_rmtree_warns_by_default() {
+            let matcher = AstMatcher::new();
+            let code = "use File::Path;\nFile::Path::rmtree(\"/tmp/test\");\n";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::Perl)
+                .expect("perl matcher should run");
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id == "heredoc.perl.file_path.rmtree"),
+                "should match File::Path::rmtree"
+            );
+            let rmtree = matches
+                .into_iter()
+                .find(|m| m.rule_id == "heredoc.perl.file_path.rmtree")
+                .expect("rmtree match present");
+            assert!(!rmtree.severity.blocks_by_default());
+        }
+    }
+
+    mod perl_negative_fixtures {
+        use super::*;
+
+        #[test]
+        fn perl_comments_do_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "# system(\"rm -rf /\")\nprint \"ok\";\n";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::Perl)
+                .expect("perl matcher should run");
+            assert!(
+                matches.is_empty(),
+                "commented-out dangerous code is not executed"
+            );
+        }
+
+        #[test]
+        fn perl_printing_dangerous_string_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "print \"rm -rf /\";\n";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::Perl)
+                .expect("perl matcher should run");
+            assert!(
+                matches.is_empty(),
+                "printed strings are data, not execution"
+            );
+        }
     }
 
     #[test]

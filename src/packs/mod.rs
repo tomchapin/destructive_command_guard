@@ -996,8 +996,15 @@ fn normalize_command_word_token(token: &str) -> Option<String> {
     let mut out = token;
     let mut changed = false;
 
-    if let Some(stripped) = out.strip_prefix('\\') {
-        if !stripped.is_empty() {
+    let stripped = out.trim_start_matches('\\');
+    if !stripped.is_empty() && stripped.len() != out.len() {
+        // Only strip leading backslashes when it looks like an escaped command word.
+        // This avoids turning escaped quotes (e.g., `\"`) into real quotes, which can
+        // change tokenization on subsequent normalization passes.
+        let first = stripped.as_bytes()[0];
+        let looks_like_command =
+            first.is_ascii_alphanumeric() || matches!(first, b'/' | b'.' | b'_' | b'~');
+        if looks_like_command {
             out = stripped;
             changed = true;
         }

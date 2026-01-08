@@ -46,3 +46,4 @@ tarpaulin-report.html
 # Test artifacts
 test-artifacts/
 junit.xml
+proptest-regressions/
