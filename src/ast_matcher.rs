@@ -559,6 +559,7 @@ pub static DEFAULT_MATCHER: LazyLock<AstMatcher> = LazyLock::new(AstMatcher::new
 // ============================================================================
 
 #[cfg(test)]
+#[allow(clippy::similar_names)] // `matcher` vs `matches` is readable in test code
 mod tests {
     use super::*;
 
