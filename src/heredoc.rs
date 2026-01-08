@@ -59,9 +59,8 @@ static HEREDOC_TRIGGERS: LazyLock<RegexSet> = LazyLock::new(|| {
         // Heredoc operators (bash, sh, zsh)
         r"<<-?\s*['\x22]?\w+['\x22]?", // << or <<- with optional quotes
         r"<<<",                        // Here-strings (bash)
-        // Python inline execution
+        // Python inline execution (python3? matches python and python3)
         r"\bpython3?\s+-[ce]\s",
-        r"\bpython\s+-[ce]\s",
         // Ruby inline execution
         r"\bruby\s+-e\s",
         r"\birb\s+-e\s",
@@ -180,23 +179,42 @@ pub enum ScriptLanguage {
 
 impl ScriptLanguage {
     /// Infer language from a command prefix (e.g., "python3", "ruby").
+    ///
+    /// Matches exact command names or names with version suffixes (e.g., "python3.11").
+    /// Does NOT match arbitrary words that start with a command name (e.g., "shebang" ≠ "sh").
     #[must_use]
     pub fn from_command(cmd: &str) -> Self {
         let cmd_lower = cmd.to_lowercase();
-        if cmd_lower.starts_with("python") {
+
+        // Helper: check if cmd matches base name, optionally followed by version digits/dots
+        // e.g., "python" matches "python", "python3", "python3.11"
+        // but "python" does NOT match "pythonic" or "python_helper"
+        let matches_interpreter = |base: &str| -> bool {
+            if cmd_lower == base {
+                return true;
+            }
+            // Allow version suffixes: digits and dots (e.g., "3", "3.11", "3.11.4")
+            cmd_lower.strip_prefix(base).is_some_and(|suffix| {
+                !suffix.is_empty()
+                    && suffix.chars().all(|c| c.is_ascii_digit() || c == '.')
+                    && suffix.chars().next().is_some_and(|c| c.is_ascii_digit())
+            })
+        };
+
+        if matches_interpreter("python") {
             Self::Python
-        } else if cmd_lower.starts_with("ruby") || cmd_lower.starts_with("irb") {
+        } else if matches_interpreter("ruby") || matches_interpreter("irb") {
             Self::Ruby
-        } else if cmd_lower.starts_with("perl") {
+        } else if matches_interpreter("perl") {
             Self::Perl
-        } else if cmd_lower.starts_with("node") {
+        } else if matches_interpreter("node") || matches_interpreter("nodejs") {
             Self::JavaScript
-        } else if cmd_lower.starts_with("deno") || cmd_lower.starts_with("bun") {
+        } else if matches_interpreter("deno") || matches_interpreter("bun") {
             Self::TypeScript
-        } else if cmd_lower.starts_with("sh")
-            || cmd_lower.starts_with("bash")
-            || cmd_lower.starts_with("zsh")
-            || cmd_lower.starts_with("fish")
+        } else if matches_interpreter("sh")
+            || matches_interpreter("bash")
+            || matches_interpreter("zsh")
+            || matches_interpreter("fish")
         {
             Self::Bash
         } else {
@@ -222,12 +240,24 @@ impl ScriptLanguage {
             return None;
         }
 
-        // Extract interpreter: either the last path component or env argument
+        // Extract interpreter: handle both direct paths and env-style shebangs
         // Examples:
         //   #!/bin/bash           -> bash
+        //   #!/bin/bash -e        -> bash (ignores flags)
         //   #!/usr/bin/env python3 -> python3
+        //   #!/usr/bin/env python3 -u -> python3 (ignores flags)
         //   #!/usr/bin/python     -> python
-        let interpreter = shebang.split_whitespace().last()?.rsplit('/').next()?;
+        let mut parts = shebang.split_whitespace();
+        let first = parts.next()?;
+        let basename = first.rsplit('/').next().unwrap_or(first);
+
+        // If it's "env", the interpreter is the next argument
+        let interpreter = if basename == "env" {
+            let next = parts.next()?;
+            next.rsplit('/').next().unwrap_or(next)
+        } else {
+            basename
+        };
 
         // Use existing from_command logic to map interpreter to language
         let lang = Self::from_command(interpreter);
@@ -546,11 +576,26 @@ static HEREDOC_EXTRACTOR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"<<([-~])?\s*(['\x22]?)(\w+)(['\x22]?)").expect("heredoc regex compiles")
 });
 
-/// Regex for here-string extraction (<<<).
-static HERESTRING_EXTRACTOR: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches: <<< followed by quoted or unquoted content
-    Regex::new(r"<<<\s*(['\x22])([^'\x22]*)(['\x22])|<<<\s*(\S+)")
-        .expect("herestring regex compiles")
+/// Regex for here-string extraction with single quotes (<<<).
+static HERESTRING_SINGLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches: <<< 'content' - content can contain double quotes
+    // Group 1: content
+    Regex::new(r"<<<\s*'([^']*)'").expect("herestring single-quote regex compiles")
+});
+
+/// Regex for here-string extraction with double quotes (<<<).
+static HERESTRING_DOUBLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches: <<< "content" - content can contain single quotes
+    // Group 1: content
+    Regex::new(r#"<<<\s*"([^"]*)""#).expect("herestring double-quote regex compiles")
+});
+
+/// Regex for here-string extraction without quotes (<<<).
+static HERESTRING_UNQUOTED: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches: <<< word - unquoted single word (NOT starting with quote)
+    // Group 1: content
+    // [^'\x22\s] ensures we don't match quoted forms
+    Regex::new(r"<<<\s*([^'\x22\s]\S*)").expect("herestring unquoted regex compiles")
 });
 
 /// Regex for inline script flag extraction with single quotes.
@@ -754,32 +799,40 @@ fn extract_herestrings(
     }
 
     let mut hit_limit = false;
-    for cap in HERESTRING_EXTRACTOR.captures_iter(command) {
-        if extracted.len() >= limits.max_heredocs {
-            hit_limit = true;
-            break;
+
+    // Helper to extract from a given pattern (quoted patterns have content in group 1)
+    let mut extract_quoted = |pattern: &Regex, is_quoted: bool| {
+        for cap in pattern.captures_iter(command) {
+            if extracted.len() >= limits.max_heredocs {
+                hit_limit = true;
+                break;
+            }
+
+            // Content is in group 1 for all our here-string patterns
+            let content = cap.get(1).map_or("", |m| m.as_str());
+
+            if content.len() > limits.max_body_bytes {
+                continue;
+            }
+
+            let full_match = cap.get(0).unwrap();
+
+            extracted.push(ExtractedContent {
+                content: content.to_string(),
+                language: ScriptLanguage::Bash, // Here-strings are bash-specific
+                delimiter: None,
+                byte_range: full_match.start()..full_match.end(),
+                quoted: is_quoted,
+                heredoc_type: Some(HeredocType::HereString),
+            });
         }
+    };
 
-        // Quoted form: group 2 has content
-        // Unquoted form: group 4 has content
-        let content = cap.get(2).or_else(|| cap.get(4)).map_or("", |m| m.as_str());
-
-        if content.len() > limits.max_body_bytes {
-            continue;
-        }
-
-        let full_match = cap.get(0).unwrap();
-        let quoted = cap.get(1).is_some(); // Has opening quote
-
-        extracted.push(ExtractedContent {
-            content: content.to_string(),
-            language: ScriptLanguage::Bash, // Here-strings are bash-specific
-            delimiter: None,
-            byte_range: full_match.start()..full_match.end(),
-            quoted,
-            heredoc_type: Some(HeredocType::HereString),
-        });
-    }
+    // Extract from single-quoted, double-quoted, then unquoted patterns
+    // Quoted patterns first to avoid unquoted matching the outer quotes
+    extract_quoted(&HERESTRING_SINGLE_QUOTE, true);
+    extract_quoted(&HERESTRING_DOUBLE_QUOTE, true);
+    extract_quoted(&HERESTRING_UNQUOTED, false);
 
     if hit_limit {
         skip_reasons.push(SkipReason::ExceededHeredocLimit {
@@ -1240,6 +1293,70 @@ mod tests {
         }
 
         #[test]
+        fn extracts_empty_heredoc() {
+            // Empty heredoc is valid - body is empty but terminator is found
+            let cmd = "cat << EOF\nEOF";
+            let result = extract_content(cmd, &ExtractionLimits::default());
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 1);
+                assert_eq!(contents[0].content, "");
+                assert_eq!(contents[0].delimiter, Some("EOF".to_string()));
+            } else {
+                panic!("Expected Extracted result for empty heredoc, got {result:?}");
+            }
+        }
+
+        #[test]
+        fn extracts_here_string_with_nested_quotes() {
+            // Here-string with double quotes inside single quotes
+            let result = extract_content(
+                r#"cat <<< 'hello "world" test'"#,
+                &ExtractionLimits::default(),
+            );
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 1);
+                assert_eq!(contents[0].content, r#"hello "world" test"#);
+                assert!(contents[0].quoted);
+            } else {
+                panic!("Expected Extracted result");
+            }
+
+            // Here-string with single quotes inside double quotes
+            let result = extract_content(
+                r#"cat <<< "hello 'world' test""#,
+                &ExtractionLimits::default(),
+            );
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 1);
+                assert_eq!(contents[0].content, "hello 'world' test");
+                assert!(contents[0].quoted);
+            } else {
+                panic!("Expected Extracted result");
+            }
+        }
+
+        #[test]
+        fn from_command_does_not_false_positive() {
+            // These should NOT be detected as interpreters
+            assert_eq!(ScriptLanguage::from_command("shebang"), ScriptLanguage::Unknown);
+            assert_eq!(ScriptLanguage::from_command("shell"), ScriptLanguage::Unknown);
+            assert_eq!(ScriptLanguage::from_command("pythonic"), ScriptLanguage::Unknown);
+            assert_eq!(ScriptLanguage::from_command("nodemon"), ScriptLanguage::Unknown);
+            assert_eq!(ScriptLanguage::from_command("perldoc"), ScriptLanguage::Unknown);
+            assert_eq!(ScriptLanguage::from_command("bashful"), ScriptLanguage::Unknown);
+        }
+
+        #[test]
+        fn from_command_matches_versioned_interpreters() {
+            // These SHOULD be detected with version suffixes
+            assert_eq!(ScriptLanguage::from_command("python3"), ScriptLanguage::Python);
+            assert_eq!(ScriptLanguage::from_command("python3.11"), ScriptLanguage::Python);
+            assert_eq!(ScriptLanguage::from_command("python3.11.4"), ScriptLanguage::Python);
+            assert_eq!(ScriptLanguage::from_command("node18"), ScriptLanguage::JavaScript);
+            assert_eq!(ScriptLanguage::from_command("perl5"), ScriptLanguage::Perl);
+        }
+
+        #[test]
         fn no_content_on_safe_command() {
             let result = extract_content("git status", &ExtractionLimits::default());
             assert!(matches!(result, ExtractionResult::NoContent));
@@ -1310,6 +1427,37 @@ mod tests {
             assert_eq!(
                 ScriptLanguage::from_shebang("#!/usr/bin/unknown\ncode"),
                 None
+            );
+        }
+
+        #[test]
+        fn from_shebang_ignores_interpreter_flags() {
+            // Direct path with flags
+            assert_eq!(
+                ScriptLanguage::from_shebang("#!/bin/bash -e\nset -x"),
+                Some(ScriptLanguage::Bash)
+            );
+            assert_eq!(
+                ScriptLanguage::from_shebang("#!/bin/bash -ex\necho hello"),
+                Some(ScriptLanguage::Bash)
+            );
+            assert_eq!(
+                ScriptLanguage::from_shebang("#!/usr/bin/python3 -u\nimport sys"),
+                Some(ScriptLanguage::Python)
+            );
+
+            // Env-style with flags
+            assert_eq!(
+                ScriptLanguage::from_shebang("#!/usr/bin/env python3 -u\nimport sys"),
+                Some(ScriptLanguage::Python)
+            );
+            assert_eq!(
+                ScriptLanguage::from_shebang("#!/usr/bin/env bash -e\necho hi"),
+                Some(ScriptLanguage::Bash)
+            );
+            assert_eq!(
+                ScriptLanguage::from_shebang("#!/usr/bin/env ruby -w\nputs 'hi'"),
+                Some(ScriptLanguage::Ruby)
             );
         }
 
