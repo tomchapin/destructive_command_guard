@@ -514,6 +514,197 @@ pub fn classify_command(command: &str) -> CommandSpans {
     ContextClassifier::new().classify(command)
 }
 
+// =============================================================================
+// Safe String-Argument Registry (git_safety_guard-t8x.1)
+// =============================================================================
+
+/// A registry of commands and flags whose arguments are purely data, not code.
+///
+/// This enables the pattern matching engine to suppress false positives for
+/// common developer workflows like:
+/// - `git commit -m "Fix rm -rf detection"` (commit message is data)
+/// - `rg "rm -rf" src/` (search pattern is data)
+/// - `bd create --description="This blocks rm -rf"` (description is data)
+///
+/// # Design Principles
+///
+/// 1. **Conservative**: Only entries where we're 100% confident args are data
+/// 2. **Explicit**: Each entry must have a test demonstrating its need
+/// 3. **Versioned**: Registry can be extended over time with new entries
+#[derive(Debug, Clone)]
+pub struct SafeStringRegistry {
+    /// Commands where ALL arguments are data (e.g., echo, printf)
+    all_args_data: &'static [&'static str],
+    /// Command + flag combinations where the flag's value is data
+    flag_data_pairs: &'static [SafeFlagEntry],
+}
+
+/// An entry for a command+flag combination whose argument is data.
+#[derive(Debug, Clone, Copy)]
+pub struct SafeFlagEntry {
+    /// The command (base name, without path)
+    pub command: &'static str,
+    /// The short flag (e.g., "-m")
+    pub short_flag: Option<&'static str>,
+    /// The long flag (e.g., "--message")
+    pub long_flag: Option<&'static str>,
+}
+
+impl SafeFlagEntry {
+    /// Create a new entry with both short and long flags.
+    #[must_use]
+    pub const fn new(
+        command: &'static str,
+        short_flag: Option<&'static str>,
+        long_flag: Option<&'static str>,
+    ) -> Self {
+        Self {
+            command,
+            short_flag,
+            long_flag,
+        }
+    }
+
+    /// Create an entry with only a short flag.
+    #[must_use]
+    pub const fn short(command: &'static str, flag: &'static str) -> Self {
+        Self {
+            command,
+            short_flag: Some(flag),
+            long_flag: None,
+        }
+    }
+
+    /// Create an entry with only a long flag.
+    #[must_use]
+    pub const fn long(command: &'static str, flag: &'static str) -> Self {
+        Self {
+            command,
+            short_flag: None,
+            long_flag: Some(flag),
+        }
+    }
+
+    /// Create an entry with both short and long flags (convenience).
+    #[must_use]
+    pub const fn both(command: &'static str, short: &'static str, long: &'static str) -> Self {
+        Self {
+            command,
+            short_flag: Some(short),
+            long_flag: Some(long),
+        }
+    }
+}
+
+/// The default safe string registry with v1 entries.
+pub static SAFE_STRING_REGISTRY: SafeStringRegistry = SafeStringRegistry {
+    // Commands where ALL arguments are data (never executed by shell)
+    all_args_data: &["echo", "printf"],
+
+    // Command + flag combinations where the flag's value is data
+    flag_data_pairs: &[
+        // Git message flags - commit/tag messages are documentation
+        SafeFlagEntry::both("git", "-m", "--message"),
+        // Note: git commit -m is actually 'git' command with 'commit' subcommand + -m flag
+        // We handle this at the command level since -m is always data for git
+
+        // Beads CLI - descriptions and notes are documentation
+        SafeFlagEntry::long("bd", "--description"),
+        SafeFlagEntry::long("bd", "--title"),
+        SafeFlagEntry::long("bd", "--notes"),
+        SafeFlagEntry::long("bd", "--reason"),
+        // Search tools - patterns are data, not executed
+        SafeFlagEntry::both("grep", "-e", "--regexp"),
+        SafeFlagEntry::both("grep", "-F", "--fixed-strings"),
+        SafeFlagEntry::both("rg", "-e", "--regexp"),
+        SafeFlagEntry::long("rg", "--fixed-strings"),
+        // GitHub CLI - titles and bodies are documentation
+        SafeFlagEntry::both("gh", "-t", "--title"),
+        SafeFlagEntry::both("gh", "-b", "--body"),
+        SafeFlagEntry::both("gh", "-m", "--message"),
+        // Cargo/npm - package descriptions
+        SafeFlagEntry::long("cargo", "--message"),
+        SafeFlagEntry::long("npm", "--message"),
+    ],
+};
+
+impl SafeStringRegistry {
+    /// Check if a command has ALL its arguments as data.
+    ///
+    /// For commands like `echo` and `printf`, everything after the command
+    /// is purely printed output, not executed.
+    #[must_use]
+    pub fn is_all_args_data(&self, command: &str) -> bool {
+        let base_name = command.rsplit('/').next().unwrap_or(command);
+        self.all_args_data.contains(&base_name)
+    }
+
+    /// Check if a specific flag for a command has a data-only argument.
+    ///
+    /// Returns true if the flag's argument should be treated as data
+    /// (safe to skip pattern matching).
+    #[must_use]
+    pub fn is_flag_data(&self, command: &str, flag: &str) -> bool {
+        let base_name = command.rsplit('/').next().unwrap_or(command);
+
+        self.flag_data_pairs.iter().any(|entry| {
+            entry.command == base_name
+                && (entry.short_flag == Some(flag) || entry.long_flag == Some(flag))
+        })
+    }
+
+    /// Find all data-only flags for a given command.
+    #[must_use]
+    pub fn data_flags_for_command(&self, command: &str) -> Vec<&'static str> {
+        let base_name = command.rsplit('/').next().unwrap_or(command);
+
+        self.flag_data_pairs
+            .iter()
+            .filter(|entry| entry.command == base_name)
+            .flat_map(|entry| {
+                let short = entry.short_flag.into_iter();
+                let long = entry.long_flag.into_iter();
+                short.chain(long)
+            })
+            .collect()
+    }
+}
+
+/// Check if a command's argument at a given position should be treated as data.
+///
+/// This is a convenience function that uses the default registry to determine
+/// if an argument is purely data (not executed by the shell).
+///
+/// # Arguments
+///
+/// * `command` - The full command string
+/// * `arg_index` - The zero-based index of the argument to check
+///
+/// # Returns
+///
+/// `true` if the argument at that position is known to be data-only.
+#[must_use]
+pub fn is_argument_data(command: &str, preceding_flag: Option<&str>) -> bool {
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    if parts.is_empty() {
+        return false;
+    }
+
+    let cmd = parts[0];
+
+    // Check if all args are data for this command
+    if SAFE_STRING_REGISTRY.is_all_args_data(cmd) {
+        return true;
+    }
+
+    // Check if the preceding flag makes this argument data
+    if let Some(flag) = preceding_flag {
+        return SAFE_STRING_REGISTRY.is_flag_data(cmd, flag);
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -869,18 +1060,19 @@ mod tests {
 
         // Calculate average per command
         let total_commands = iterations * commands.len();
-        let avg_ns = elapsed.as_nanos() / total_commands as u128;
-        let avg_us = avg_ns as f64 / 1000.0;
+        let avg_nanoseconds = elapsed.as_nanos() / total_commands as u128;
+        #[allow(clippy::cast_precision_loss)]
+        let avg_microseconds = avg_nanoseconds as f64 / 1000.0;
 
         // Assert performance is under 100μs per command
         assert!(
-            avg_us < 100.0,
-            "Average classification time {avg_us:.2}μs exceeds 100μs budget"
+            avg_microseconds < 100.0,
+            "Average classification time {avg_microseconds:.2}μs exceeds 100μs budget"
         );
 
         // Print for visibility in test output
         eprintln!(
-            "Context classification performance: {avg_us:.2}μs/command ({} commands, {} iterations)",
+            "Context classification performance: {avg_microseconds:.2}μs/command ({} commands, {} iterations)",
             commands.len(),
             iterations
         );

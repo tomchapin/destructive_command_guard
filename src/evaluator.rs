@@ -532,13 +532,11 @@ mod tests {
 
             assert_eq!(
                 result1.decision, result2.decision,
-                "Parity mismatch for allowed command: {:?}",
-                cmd
+                "Parity mismatch for allowed command: {cmd:?}"
             );
             assert!(
                 result1.is_allowed(),
-                "Expected ALLOWED for {:?}, got DENIED",
-                cmd
+                "Expected ALLOWED for {cmd:?}, got DENIED"
             );
         }
     }
@@ -552,7 +550,7 @@ mod tests {
 
         let enabled_packs = config.enabled_pack_ids();
         let keywords_vec = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
-        let keywords: Vec<&str> = keywords_vec.iter().copied().collect();
+        let keywords: Vec<&str> = keywords_vec.clone();
 
         let safe_patterns: Vec<MockSafePattern> = vec![];
         let destructive_patterns: Vec<MockDestructivePattern> = vec![];
@@ -572,19 +570,16 @@ mod tests {
 
             assert_eq!(
                 result1.decision, result2.decision,
-                "Parity mismatch for pack-blocked command: {:?}",
-                cmd
+                "Parity mismatch for pack-blocked command: {cmd:?}"
             );
             assert!(
                 result1.is_denied(),
-                "Expected DENIED for {:?}, got ALLOWED",
-                cmd
+                "Expected DENIED for {cmd:?}, got ALLOWED"
             );
             assert_eq!(
                 result1.pack_id(),
                 result2.pack_id(),
-                "Pack ID mismatch for {:?}",
-                cmd
+                "Pack ID mismatch for {cmd:?}"
             );
         }
     }
@@ -603,7 +598,7 @@ mod tests {
 
         let enabled_packs = config.enabled_pack_ids();
         let keywords_vec = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
-        let keywords: Vec<&str> = keywords_vec.iter().copied().collect();
+        let keywords: Vec<&str> = keywords_vec.clone();
 
         let safe_patterns: Vec<MockSafePattern> = vec![];
         let destructive_patterns: Vec<MockDestructivePattern> = vec![];
@@ -720,7 +715,7 @@ mod tests {
 
         let enabled_packs = config.enabled_pack_ids();
         let keywords_vec = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
-        let keywords: Vec<&str> = keywords_vec.iter().copied().collect();
+        let keywords: Vec<&str> = keywords_vec.clone();
 
         let safe_patterns: Vec<MockSafePattern> = vec![];
         let destructive_patterns: Vec<MockDestructivePattern> = vec![];
