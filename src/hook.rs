@@ -340,11 +340,6 @@ fn print_contextual_suggestion_boxed(handle: &mut io::StderrLock<'_>, command: &
 }
 
 /// Output a denial response to stdout (JSON for hook protocol).
-///
-/// # Panics
-///
-/// Panics if writing the denial JSON to stdout fails. This indicates an
-/// unrecoverable I/O error.
 #[cold]
 #[inline(never)]
 pub fn output_denial(command: &str, reason: &str, pack: Option<&str>) {
@@ -365,8 +360,8 @@ pub fn output_denial(command: &str, reason: &str, pack: Option<&str>) {
     // Write JSON to stdout for the hook protocol
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    serde_json::to_writer(&mut handle, &output).unwrap();
-    writeln!(handle).unwrap();
+    let _ = serde_json::to_writer(&mut handle, &output);
+    let _ = writeln!(handle);
 }
 
 /// Log a blocked command to a file (if logging is enabled).

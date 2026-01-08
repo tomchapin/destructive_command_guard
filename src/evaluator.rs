@@ -879,6 +879,86 @@ mod tests {
     }
 
     #[test]
+    fn heredoc_commands_are_evaluated_and_block_when_severity_blocks_by_default() {
+        let config = default_config();
+        let compiled = default_compiled_overrides();
+        let allowlists = default_allowlists();
+
+        // This command would be ALLOWED by keyword quick-reject if we only looked for unrelated
+        // pack keywords. The embedded JavaScript still must be analyzed and denied.
+        let cmd =
+            "node <<EOF\nconst fs = require('fs');\nfs.rmSync('/etc', { recursive: true });\nEOF";
+        let result = evaluate_command(cmd, &config, &["kubectl"], &compiled, &allowlists);
+        assert!(result.is_denied());
+
+        let info = result.pattern_info.expect("deny must include pattern info");
+        assert_eq!(info.source, MatchSource::HeredocAst);
+        assert_eq!(info.pack_id.as_deref(), Some("heredoc.javascript"));
+        assert!(
+            info.pattern_name
+                .as_deref()
+                .is_some_and(|p| p.starts_with("fs_rmsync")),
+            "expected a fs_rmsync* heredoc rule, got {:?}",
+            info.pattern_name
+        );
+    }
+
+    #[test]
+    fn heredoc_commands_with_non_blocking_matches_are_allowed() {
+        let config = default_config();
+        let compiled = default_compiled_overrides();
+        let allowlists = default_allowlists();
+
+        // Non-catastrophic recursive deletes are currently warn-only; evaluator should not block.
+        let cmd =
+            "node <<EOF\nconst fs = require('fs');\nfs.rmSync('./dist', { recursive: true });\nEOF";
+        let result = evaluate_command(cmd, &config, &["kubectl"], &compiled, &allowlists);
+        assert!(result.is_allowed());
+        assert!(result.pattern_info.is_none());
+    }
+
+    #[test]
+    fn heredoc_allowlist_can_override_ast_denial() {
+        let config = default_config();
+        let compiled = default_compiled_overrides();
+        let allowlists =
+            project_allowlists_for_rule("heredoc.javascript:fs_rmsync.catastrophic", "local dev");
+
+        let cmd =
+            "node <<EOF\nconst fs = require('fs');\nfs.rmSync('/etc', { recursive: true });\nEOF";
+        let result = evaluate_command(cmd, &config, &["kubectl"], &compiled, &allowlists);
+        assert!(result.is_allowed());
+
+        let override_info = result
+            .allowlist_override
+            .as_ref()
+            .expect("allowlist override metadata must be present");
+        assert_eq!(override_info.layer, AllowlistLayer::Project);
+        assert_eq!(override_info.reason, "local dev");
+        assert_eq!(
+            override_info.matched.pack_id.as_deref(),
+            Some("heredoc.javascript")
+        );
+        assert_eq!(
+            override_info.matched.pattern_name.as_deref(),
+            Some("fs_rmsync.catastrophic")
+        );
+        assert_eq!(override_info.matched.source, MatchSource::HeredocAst);
+    }
+
+    #[test]
+    fn heredoc_trigger_strings_inside_safe_string_arguments_do_not_scan_or_block() {
+        let config = default_config();
+        let compiled = default_compiled_overrides();
+        let allowlists = default_allowlists();
+
+        // Commit messages can contain heredoc syntax as documentation; these are data-only.
+        let cmd = r#"git commit -m "docs: example heredoc: cat <<EOF rm -rf / EOF""#;
+        let result = evaluate_command(cmd, &config, &["git"], &compiled, &allowlists);
+        assert!(result.is_allowed());
+    }
+
+    #[test]
     fn test_evaluation_decision_equality() {
         assert_eq!(EvaluationDecision::Allow, EvaluationDecision::Allow);
         assert_eq!(EvaluationDecision::Deny, EvaluationDecision::Deny);

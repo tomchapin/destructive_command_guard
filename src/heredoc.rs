@@ -988,7 +988,14 @@ fn extract_heredocs(
 
         let quoted = !open_quote.is_empty() || !close_quote.is_empty();
         let full_match = cap.get(0).unwrap();
-        let start_pos = full_match.end();
+        let mut start_pos = full_match.end();
+
+        // Heredoc bodies start on the next line. If there are trailing tokens after the delimiter
+        // on the same line (pipelines, redirects, etc.), skip them so we don't corrupt the
+        // extracted body (which can otherwise cause AST parse failures and false negatives).
+        start_pos = command[start_pos..]
+            .find('\n')
+            .map_or(command.len(), |rel| start_pos.saturating_add(rel));
 
         // Find the terminating delimiter
         match extract_heredoc_body(
@@ -1065,6 +1072,9 @@ fn extract_heredoc_body(
         }
 
         let line = part.strip_suffix('\n').unwrap_or(part);
+        // Normalize CRLF line endings so terminator detection works cross-platform and so extracted
+        // code doesn't include stray '\r' characters (which can break AST parsing).
+        let line = line.strip_suffix('\r').unwrap_or(line);
 
         // Check if this line is the terminator
         let trimmed = match heredoc_type {
@@ -1573,6 +1583,35 @@ mod tests {
         }
 
         #[test]
+        fn extracts_heredoc_ignores_trailing_tokens_on_delimiter_line() {
+            let cmd = "python3 <<EOF | cat\nimport shutil\nshutil.rmtree('/tmp/test')\nEOF";
+            let result = extract_content(cmd, &ExtractionLimits::default());
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 1);
+                assert_eq!(contents[0].language, ScriptLanguage::Python);
+                assert_eq!(
+                    contents[0].content,
+                    "import shutil\nshutil.rmtree('/tmp/test')"
+                );
+            } else {
+                panic!("Expected Extracted result, got {result:?}");
+            }
+        }
+
+        #[test]
+        fn extracts_heredoc_with_crlf_line_endings() {
+            let cmd = "cat <<EOF\r\nline1\r\nEOF\r\n";
+            let result = extract_content(cmd, &ExtractionLimits::default());
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 1);
+                assert_eq!(contents[0].content, "line1");
+                assert_eq!(contents[0].delimiter.as_deref(), Some("EOF"));
+            } else {
+                panic!("Expected Extracted result, got {result:?}");
+            }
+        }
+
+        #[test]
         fn extracts_heredoc_tab_stripped() {
             let cmd = "cat <<- EOF\n\tline1\n\tline2\nEOF";
             let result = extract_content(cmd, &ExtractionLimits::default());
@@ -1583,6 +1622,93 @@ mod tests {
                 assert_eq!(contents[0].heredoc_type, Some(HeredocType::TabStripped));
             } else {
                 panic!("Expected Extracted result");
+            }
+        }
+
+        #[test]
+        fn extracts_heredoc_indent_stripped() {
+            // Indentation-stripping heredoc (<<~) should:
+            // - accept an indented terminator
+            // - strip the minimum common indentation from non-empty lines
+            let cmd = "cat <<~ EOF\n    line1\n    line2\n    EOF";
+            let result = extract_content(cmd, &ExtractionLimits::default());
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 1);
+                assert_eq!(contents[0].content, "line1\nline2");
+                assert_eq!(contents[0].heredoc_type, Some(HeredocType::IndentStripped));
+            } else {
+                panic!("Expected Extracted result, got {result:?}");
+            }
+        }
+
+        #[test]
+        fn extracts_heredoc_quoted_delimiter_sets_quoted_flag() {
+            // Quoted delimiter suppresses expansion in real shells; we track this for context.
+            let cmd = "cat << 'EOF'\nline1\nEOF";
+            let result = extract_content(cmd, &ExtractionLimits::default());
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 1);
+                assert_eq!(contents[0].content, "line1");
+                assert_eq!(contents[0].delimiter.as_deref(), Some("EOF"));
+                assert!(contents[0].quoted, "quoted delimiter must set quoted=true");
+            } else {
+                panic!("Expected Extracted result, got {result:?}");
+            }
+
+            let cmd = "cat << EOF\nline1\nEOF";
+            let result = extract_content(cmd, &ExtractionLimits::default());
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 1);
+                assert!(
+                    !contents[0].quoted,
+                    "unquoted delimiter must set quoted=false"
+                );
+            } else {
+                panic!("Expected Extracted result, got {result:?}");
+            }
+        }
+
+        #[test]
+        fn heredoc_language_detects_interpreter_prefixes() {
+            // Regression test: heredoc bodies must not default to Bash when the interpreter is explicit.
+            let cases = [
+                ("python3 <<EOF\nprint('hello')\nEOF", ScriptLanguage::Python),
+                (
+                    "node <<EOF\nconsole.log('hello');\nEOF",
+                    ScriptLanguage::JavaScript,
+                ),
+                ("ruby <<EOF\nputs 'hello'\nEOF", ScriptLanguage::Ruby),
+                ("perl <<EOF\nprint \"hello\";\nEOF", ScriptLanguage::Perl),
+                ("bash <<EOF\necho hello\nEOF", ScriptLanguage::Bash),
+            ];
+
+            for (cmd, expected) in cases {
+                let result = extract_content(cmd, &ExtractionLimits::default());
+                if let ExtractionResult::Extracted(contents) = result {
+                    assert_eq!(
+                        contents.len(),
+                        1,
+                        "expected one heredoc extraction for: {cmd}"
+                    );
+                    assert_eq!(
+                        contents[0].language, expected,
+                        "expected language {expected:?} for heredoc: {cmd}"
+                    );
+                } else {
+                    panic!("Expected Extracted result for heredoc: {cmd}, got {result:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn heredoc_language_detects_shebang_when_command_unknown() {
+            let cmd = "cat <<EOF\n#!/usr/bin/env python3\nimport os\nprint('hi')\nEOF";
+            let result = extract_content(cmd, &ExtractionLimits::default());
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 1);
+                assert_eq!(contents[0].language, ScriptLanguage::Python);
+            } else {
+                panic!("Expected Extracted result, got {result:?}");
             }
         }
 
@@ -1607,6 +1733,7 @@ mod tests {
             let result = extract_content(cmd, &ExtractionLimits::default());
             if let ExtractionResult::Extracted(contents) = result {
                 assert_eq!(contents.len(), 1);
+                assert_eq!(contents[0].language, ScriptLanguage::Python);
                 let range = &contents[0].byte_range;
                 // byte_range should cover from "<< END" to the final "END"
                 let extracted_span = &cmd[range.clone()];
