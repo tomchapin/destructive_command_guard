@@ -182,7 +182,7 @@ impl EvaluationResult {
 
     /// Create an "allowed" result due to allowlist override.
     #[must_use]
-    pub fn allowed_by_allowlist(matched: PatternMatch, layer: AllowlistLayer, reason: String) -> Self {
+    pub const fn allowed_by_allowlist(matched: PatternMatch, layer: AllowlistLayer, reason: String) -> Self {
         Self {
             decision: EvaluationDecision::Allow,
             pattern_info: None,

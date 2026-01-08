@@ -147,15 +147,9 @@ pub struct LoadedAllowlistLayer {
 }
 
 /// All allowlist layers, ordered by precedence (project > user > system).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LayeredAllowlist {
     pub layers: Vec<LoadedAllowlistLayer>,
-}
-
-impl Default for LayeredAllowlist {
-    fn default() -> Self {
-        Self { layers: Vec::new() }
-    }
 }
 
 impl LayeredAllowlist {
