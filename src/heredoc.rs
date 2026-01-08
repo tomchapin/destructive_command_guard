@@ -484,7 +484,10 @@ pub enum SkipReason {
     /// Maximum heredoc count reached.
     ExceededHeredocLimit { limit: usize },
     /// Binary-like content detected (contains null bytes or high non-printable ratio).
-    BinaryContent { null_bytes: usize, non_printable_ratio: f32 },
+    BinaryContent {
+        null_bytes: usize,
+        non_printable_ratio: f32,
+    },
     /// Heredoc delimiter not found (unterminated).
     UnterminatedHeredoc { delimiter: String },
     /// Malformed input that couldn't be parsed.
@@ -503,7 +506,10 @@ impl std::fmt::Display for SkipReason {
             Self::ExceededHeredocLimit { limit } => {
                 write!(f, "exceeded heredoc limit: max {limit} heredocs")
             }
-            Self::BinaryContent { null_bytes, non_printable_ratio } => {
+            Self::BinaryContent {
+                null_bytes,
+                non_printable_ratio,
+            } => {
                 write!(
                     f,
                     "binary content detected: {null_bytes} null bytes, {:.1}% non-printable",
@@ -890,14 +896,15 @@ fn extract_heredoc_body(
         body_lines.push(line);
     }
 
-    if !found_terminator && !body_lines.is_empty() {
-        // If no terminator found but we have content, this might be a single-line
-        // heredoc or the content continues beyond our view
+    if !found_terminator {
+        // No terminator found - either unterminated or content continues beyond view
         return None;
     }
 
+    // Empty heredoc is valid (e.g., `cat << EOF\nEOF`)
+    // Return empty string if terminator was found with no content
     if body_lines.is_empty() {
-        return None;
+        return Some(String::new());
     }
 
     // Apply indentation stripping if needed
@@ -1428,8 +1435,7 @@ mod tests {
 
         #[test]
         fn detect_handles_absolute_path() {
-            let (lang, confidence) =
-                ScriptLanguage::detect("/usr/bin/python3 -c 'code'", "");
+            let (lang, confidence) = ScriptLanguage::detect("/usr/bin/python3 -c 'code'", "");
             assert_eq!(lang, ScriptLanguage::Python);
             assert_eq!(confidence, DetectionConfidence::CommandPrefix);
         }
@@ -1447,13 +1453,17 @@ mod tests {
 
         #[test]
         fn detection_confidence_reasons() {
-            assert!(DetectionConfidence::CommandPrefix
-                .reason()
-                .contains("highest"));
+            assert!(
+                DetectionConfidence::CommandPrefix
+                    .reason()
+                    .contains("highest")
+            );
             assert!(DetectionConfidence::Shebang.reason().contains("high"));
-            assert!(DetectionConfidence::ContentHeuristics
-                .reason()
-                .contains("lower"));
+            assert!(
+                DetectionConfidence::ContentHeuristics
+                    .reason()
+                    .contains("lower")
+            );
             assert!(DetectionConfidence::Unknown.reason().contains("could not"));
         }
 
@@ -1469,10 +1479,11 @@ mod tests {
             // Should return Skipped with size limit reason
             match result {
                 ExtractionResult::Skipped(reasons) => {
-                    assert!(reasons.iter().any(|r| matches!(
-                        r,
-                        SkipReason::ExceededSizeLimit { .. }
-                    )));
+                    assert!(
+                        reasons
+                            .iter()
+                            .any(|r| matches!(r, SkipReason::ExceededSizeLimit { .. }))
+                    );
                 }
                 ExtractionResult::NoContent | ExtractionResult::Failed(_) => {}
                 ExtractionResult::Extracted(contents) => {
@@ -1506,7 +1517,9 @@ mod tests {
             // Content with null bytes should be detected as binary
             let cmd = "python -c '\x00binary\x00content'";
             if let Some(reason) = check_binary_content(cmd) {
-                assert!(matches!(reason, SkipReason::BinaryContent { null_bytes, .. } if null_bytes > 0));
+                assert!(
+                    matches!(reason, SkipReason::BinaryContent { null_bytes, .. } if null_bytes > 0)
+                );
             } else {
                 panic!("Expected binary content detection");
             }
@@ -1536,10 +1549,11 @@ mod tests {
             let result = extract_content(cmd, &ExtractionLimits::default());
             match result {
                 ExtractionResult::Skipped(reasons) => {
-                    assert!(reasons.iter().any(|r| matches!(
-                        r,
-                        SkipReason::UnterminatedHeredoc { .. }
-                    )));
+                    assert!(
+                        reasons
+                            .iter()
+                            .any(|r| matches!(r, SkipReason::UnterminatedHeredoc { .. }))
+                    );
                 }
                 _ => panic!("Expected Skipped result for unterminated heredoc"),
             }
@@ -1564,12 +1578,25 @@ mod tests {
         fn skip_reason_display() {
             // Test Display implementations
             let reasons = vec![
-                SkipReason::ExceededSizeLimit { actual: 2000, limit: 1000 },
-                SkipReason::ExceededLineLimit { actual: 200, limit: 100 },
+                SkipReason::ExceededSizeLimit {
+                    actual: 2000,
+                    limit: 1000,
+                },
+                SkipReason::ExceededLineLimit {
+                    actual: 200,
+                    limit: 100,
+                },
                 SkipReason::ExceededHeredocLimit { limit: 10 },
-                SkipReason::BinaryContent { null_bytes: 5, non_printable_ratio: 0.5 },
-                SkipReason::UnterminatedHeredoc { delimiter: "EOF".to_string() },
-                SkipReason::MalformedInput { reason: "test".to_string() },
+                SkipReason::BinaryContent {
+                    null_bytes: 5,
+                    non_printable_ratio: 0.5,
+                },
+                SkipReason::UnterminatedHeredoc {
+                    delimiter: "EOF".to_string(),
+                },
+                SkipReason::MalformedInput {
+                    reason: "test".to_string(),
+                },
             ];
 
             for reason in reasons {
