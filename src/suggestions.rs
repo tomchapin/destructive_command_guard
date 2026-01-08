@@ -143,7 +143,6 @@ pub fn get_suggestion_by_kind(rule_id: &str, kind: SuggestionKind) -> Option<&'s
 /// Build the suggestion registry.
 ///
 /// This function is called once by `LazyLock` to initialize the registry.
-#[allow(clippy::too_many_lines)]
 fn build_suggestion_registry() -> HashMap<&'static str, Vec<Suggestion>> {
     let mut m = HashMap::new();
     register_core_git_suggestions(&mut m);
@@ -266,14 +265,14 @@ fn register_core_git_suggestions(m: &mut HashMap<&'static str, Vec<Suggestion>>)
         .with_command("git diff"),
         Suggestion::new(
             SuggestionKind::SaferAlternative,
-            "Use `git restore --staged` to unstage without discarding changes",
-        )
-        .with_command("git restore --staged"),
-        Suggestion::new(
-            SuggestionKind::WorkflowFix,
-            "Stash changes before discarding with `git stash`",
+            "Use `git stash` to save changes (retrievable later) instead of discarding",
         )
         .with_command("git stash"),
+        Suggestion::new(
+            SuggestionKind::WorkflowFix,
+            "Commit changes before discarding to preserve them in history",
+        )
+        .with_command("git commit -m 'WIP: saving changes'"),
     ];
     m.insert(
         "core.git:restore-worktree",
