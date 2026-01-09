@@ -1082,10 +1082,10 @@ const fn set_wrapper_pending(
 #[inline]
 #[must_use]
 fn sudo_option_takes_value(token: &str) -> Option<WrapperOptionValueMode> {
-    // Common sudo options that take an argument: -u user, -g group, -h host, -p prompt, -C num.
-    // These show up frequently in automation and are important for correct wrapper stripping.
-    const SHORT_VALUE_OPTS: &[&str] = &["-u", "-g", "-h", "-p", "-C", "-t", "-a", "-U"];
-    const LONG_VALUE_OPTS: &[&str] = &["--user", "--group", "--host", "--prompt"];
+    // Common sudo options that take an argument: -u user, -g group, -h host, -p prompt, -C num,
+    // -r role, -D directory. These show up in automation and are important for correct wrapper stripping.
+    const SHORT_VALUE_OPTS: &[&str] = &["-u", "-g", "-h", "-p", "-C", "-t", "-a", "-U", "-r", "-D"];
+    const LONG_VALUE_OPTS: &[&str] = &["--user", "--group", "--host", "--prompt", "--role", "--chdir"];
 
     if token.starts_with("--") {
         for opt in LONG_VALUE_OPTS {
@@ -2268,5 +2268,38 @@ mod tests {
         assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
         assert!(!sanitized.as_ref().contains("rm -rf"));
         assert!(sanitized.as_ref().contains("git commit -am"));
+    }
+
+    #[test]
+    fn sanitize_handles_sudo_d_chdir_wrapper() {
+        // sudo -D changes to directory before running command
+        let cmd = r#"sudo -D /tmp git commit -m "Fix rm -rf detection""#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("sudo -D /tmp git commit -m"));
+    }
+
+    #[test]
+    fn sanitize_handles_sudo_r_role_wrapper() {
+        // sudo -r uses specified role
+        let cmd = r#"sudo -r myrole git commit -m "Fix rm -rf detection""#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("sudo -r myrole git commit -m"));
+    }
+
+    #[test]
+    fn sanitize_handles_sudo_chdir_long_wrapper() {
+        // sudo --chdir changes to directory before running command
+        let cmd = r#"sudo --chdir=/tmp git commit -m "Fix rm -rf detection""#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("sudo --chdir=/tmp git commit -m"));
     }
 }
