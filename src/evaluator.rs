@@ -570,7 +570,6 @@ pub fn evaluate_command_with_pack_order(
                 allowlists,
                 heredoc_settings,
                 &mut heredoc_allowlist_hit,
-                None,
             ) {
                 return blocked;
             }
@@ -610,7 +609,7 @@ pub fn evaluate_command_with_pack_order(
     // "disable other packs" by stopping evaluation early. If a command matches multiple
     // packs/patterns, allowlisting the first match should still allow later matches to
     // deny the command.
-    let result = evaluate_packs_with_allowlists(&normalized, ordered_packs, allowlists, None);
+    let result = evaluate_packs_with_allowlists(&normalized, ordered_packs, allowlists);
     if result.allowlist_override.is_none() {
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
