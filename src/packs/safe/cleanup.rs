@@ -498,13 +498,27 @@ mod tests {
     }
 
     #[test]
-    fn allows_multiple_dirs_in_one_command() {
+    fn allows_multiple_safe_dirs_in_one_command() {
         let pack = pack();
-        // When user deletes multiple dirs, each should be checked individually
-        // This test verifies the pattern terminates correctly at word boundaries
+        // Multi-path commands are only allowed when ALL paths are in the allowlist.
+        // This ensures "rm -rf target/ /etc" is blocked even though target/ is safe.
         assert!(
             pack.matches_safe("rm -rf target/ dist/"),
-            "rm -rf target/ dist/ should be allowed (first dir matches)"
+            "rm -rf target/ dist/ should be allowed (both dirs are in allowlist)"
+        );
+    }
+
+    #[test]
+    fn blocks_mixed_safe_and_unsafe_dirs() {
+        let pack = pack();
+        // If ANY path is not in the allowlist, the command should not match the safe pattern.
+        assert!(
+            !pack.matches_safe("rm -rf target/ src/"),
+            "rm -rf target/ src/ should NOT be allowed (src/ not in allowlist)"
+        );
+        assert!(
+            !pack.matches_safe("rm -rf target/ /etc/"),
+            "rm -rf target/ /etc/ should NOT be allowed (absolute path)"
         );
     }
 }
