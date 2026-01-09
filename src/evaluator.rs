@@ -471,13 +471,11 @@ pub fn evaluate_command(
 }
 
 #[inline]
-#[allow(dead_code)] // Reserved for future deadline-based evaluation in hook mode
 fn deadline_exceeded(deadline: Option<&Deadline>) -> bool {
     deadline.is_some_and(|d| d.max_duration().is_zero() || d.is_exceeded())
 }
 
 #[inline]
-#[allow(dead_code)] // Reserved for future deadline-based evaluation in hook mode
 fn remaining_below(deadline: Option<&Deadline>, budget: &crate::perf::Budget) -> bool {
     deadline.is_some_and(|d| !d.has_budget_for(budget))
 }
@@ -572,6 +570,7 @@ pub fn evaluate_command_with_pack_order(
                 allowlists,
                 heredoc_settings,
                 &mut heredoc_allowlist_hit,
+                None,
             ) {
                 return blocked;
             }
@@ -611,7 +610,7 @@ pub fn evaluate_command_with_pack_order(
     // "disable other packs" by stopping evaluation early. If a command matches multiple
     // packs/patterns, allowlisting the first match should still allow later matches to
     // deny the command.
-    let result = evaluate_packs_with_allowlists(&normalized, ordered_packs, allowlists);
+    let result = evaluate_packs_with_allowlists(&normalized, ordered_packs, allowlists, None);
     if result.allowlist_override.is_none() {
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
@@ -649,36 +648,135 @@ pub fn evaluate_command_with_pack_order_deadline(
     heredoc_settings: &crate::config::HeredocSettings,
     deadline: Option<&Deadline>,
 ) -> EvaluationResult {
-    // Check deadline at entry - if already exceeded, fail-open immediately
-    if let Some(d) = deadline {
-        if d.is_exceeded() {
+    // Check deadline at entry - if already exceeded, fail-open immediately.
+    if deadline_exceeded(deadline) {
+        return EvaluationResult::allowed_due_to_budget();
+    }
+
+    // Empty commands are allowed (no-op)
+    if command.is_empty() {
+        return EvaluationResult::allowed();
+    }
+
+    // Step 1: Check precompiled allow overrides first
+    if compiled_overrides.check_allow(command) {
+        return EvaluationResult::allowed();
+    }
+
+    // Step 2: Check precompiled block overrides
+    if let Some(reason) = compiled_overrides.check_block(command) {
+        return EvaluationResult::denied_by_config(reason.to_string());
+    }
+
+    if deadline_exceeded(deadline) {
+        return EvaluationResult::allowed_due_to_budget();
+    }
+
+    // Step 3: Heredoc / inline-script detection (Tier 1/2/3, fail-open).
+    let mut precomputed_sanitized = None;
+    let mut heredoc_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
+
+    if heredoc_settings.enabled {
+        if remaining_below(deadline, &crate::perf::HEREDOC_TRIGGER) {
             return EvaluationResult::allowed_due_to_budget();
+        }
+
+        if check_triggers(command) == TriggerResult::Triggered {
+            let sanitized = sanitize_for_pattern_matching(command);
+            let sanitized_str = sanitized.as_ref();
+            let should_scan = if matches!(sanitized, std::borrow::Cow::Owned(_)) {
+                check_triggers(sanitized_str) == TriggerResult::Triggered
+            } else {
+                true
+            };
+            precomputed_sanitized = Some(sanitized);
+
+            if should_scan {
+                if let Some(blocked) = evaluate_heredoc(
+                    command,
+                    allowlists,
+                    heredoc_settings,
+                    &mut heredoc_allowlist_hit,
+                    deadline,
+                ) {
+                    return blocked;
+                }
+            }
         }
     }
 
-    // Delegate to standard evaluator
-    // The deadline is checked at entry; for more fine-grained control,
-    // the standard evaluator could be modified to accept deadline as well.
-    evaluate_command_with_pack_order(
-        command,
-        enabled_keywords,
-        ordered_packs,
-        compiled_overrides,
-        allowlists,
-        heredoc_settings,
-    )
+    if deadline_exceeded(deadline) {
+        return EvaluationResult::allowed_due_to_budget();
+    }
+
+    // Step 4: Quick rejection - if no relevant keywords, allow immediately
+    if pack_aware_quick_reject(command, enabled_keywords) {
+        if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
+            return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
+        }
+        return EvaluationResult::allowed();
+    }
+
+    if deadline_exceeded(deadline) {
+        return EvaluationResult::allowed_due_to_budget();
+    }
+
+    // Step 5: False-positive immunity - strip known-safe string arguments (commit messages, search
+    // patterns, issue descriptions, etc.) so dangerous substrings inside data do not trigger
+    // blocking. If the sanitizer actually removes anything, re-run the keyword gate on the
+    // sanitized view.
+    let sanitized = precomputed_sanitized.unwrap_or_else(|| sanitize_for_pattern_matching(command));
+    let command_for_match = sanitized.as_ref();
+    if matches!(sanitized, std::borrow::Cow::Owned(_))
+        && pack_aware_quick_reject(command_for_match, enabled_keywords)
+    {
+        if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
+            return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
+        }
+        return EvaluationResult::allowed();
+    }
+
+    if deadline_exceeded(deadline) {
+        return EvaluationResult::allowed_due_to_budget();
+    }
+
+    // Step 6: Normalize command (strip /usr/bin/git -> git, etc.)
+    let normalized = normalize_command(command_for_match);
+
+    if deadline_exceeded(deadline) {
+        return EvaluationResult::allowed_due_to_budget();
+    }
+
+    // Step 7: Check enabled packs with allowlist override semantics.
+    let result = evaluate_packs_with_allowlists(&normalized, ordered_packs, allowlists, deadline);
+    if result.allowlist_override.is_none() {
+        if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
+            return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
+        }
+    }
+
+    result
 }
 
 fn evaluate_packs_with_allowlists(
     normalized: &str,
     ordered_packs: &[String],
     allowlists: &LayeredAllowlist,
+    deadline: Option<&Deadline>,
 ) -> EvaluationResult {
+    if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH) {
+        return EvaluationResult::allowed_due_to_budget();
+    }
+
     // If we allowlist a deny, we keep scanning for other denies. If none appear,
     // we return ALLOW + the first allowlist override metadata for explain/logging.
     let mut first_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
 
     for pack_id in ordered_packs {
+        if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH) {
+            return EvaluationResult::allowed_due_to_budget();
+        }
+
         let Some(pack) = REGISTRY.get(pack_id) else {
             continue;
         };
@@ -694,6 +792,11 @@ fn evaluate_packs_with_allowlists(
         }
 
         for pattern in &pack.destructive_patterns {
+            if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH)
+            {
+                return EvaluationResult::allowed_due_to_budget();
+            }
+
             // Until warn/log are fully surfaced, match only deny-by-default patterns.
             if !pattern.severity.blocks_by_default() {
                 continue;
@@ -816,6 +919,7 @@ where
                 allowlists,
                 &heredoc_settings,
                 &mut heredoc_allowlist_hit,
+                None,
             ) {
                 return blocked;
             }
@@ -864,7 +968,7 @@ where
     // Step 9: Check enabled packs with allowlist override semantics.
     let enabled_packs: HashSet<String> = config.enabled_pack_ids();
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-    let result = evaluate_packs_with_allowlists(&normalized, &ordered_packs, allowlists);
+    let result = evaluate_packs_with_allowlists(&normalized, &ordered_packs, allowlists, None);
     if result.allowlist_override.is_none() {
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
@@ -884,15 +988,18 @@ fn evaluate_heredoc(
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
     first_allowlist_hit: &mut Option<(PatternMatch, AllowlistLayer, String)>,
+    deadline: Option<&Deadline>,
 ) -> Option<EvaluationResult> {
+    if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::FULL_HEREDOC_PIPELINE)
+    {
+        return Some(EvaluationResult::allowed_due_to_budget());
+    }
+
     // Check command-level allowlist before any extraction.
     // This allows users to whitelist entire commands (e.g., "./scripts/approved.sh").
     if let Some(ref content_allowlist) = heredoc_settings.content_allowlist {
         if let Some(matched_cmd) = content_allowlist.is_command_allowlisted(command) {
-            tracing::debug!(
-                matched_command = matched_cmd,
-                "heredoc command allowlisted"
-            );
+            tracing::debug!(matched_command = matched_cmd, "heredoc command allowlisted");
             // Command is allowlisted - skip all heredoc analysis
             return None;
         }
@@ -944,6 +1051,12 @@ fn evaluate_heredoc(
     };
 
     for content in extracted {
+        if deadline_exceeded(deadline)
+            || remaining_below(deadline, &crate::perf::FULL_HEREDOC_PIPELINE)
+        {
+            return Some(EvaluationResult::allowed_due_to_budget());
+        }
+
         if let Some(allowed) = &heredoc_settings.allowed_languages {
             if !allowed.contains(&content.language) {
                 continue;
@@ -988,6 +1101,12 @@ fn evaluate_heredoc(
         };
 
         for m in matches {
+            if deadline_exceeded(deadline)
+                || remaining_below(deadline, &crate::perf::FULL_HEREDOC_PIPELINE)
+            {
+                return Some(EvaluationResult::allowed_due_to_budget());
+            }
+
             if !m.severity.blocks_by_default() {
                 continue;
             }
@@ -1037,7 +1156,7 @@ fn evaluate_heredoc(
                 }),
                 allowlist_override: None,
                 effective_mode: Some(crate::packs::DecisionMode::Deny),
-            skipped_due_to_budget: false,
+                skipped_due_to_budget: false,
             });
         }
     }
@@ -2205,7 +2324,7 @@ mod tests {
             );
         }
 
-        /// Test the allowed_due_to_budget() result structure.
+        /// Test the `allowed_due_to_budget()` result structure.
         #[test]
         fn allowed_due_to_budget_structure() {
             let result = EvaluationResult::allowed_due_to_budget();

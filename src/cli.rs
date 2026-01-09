@@ -2014,8 +2014,7 @@ fn handle_explain(
             first_match: result.pattern_info.as_ref().and_then(|p| p.pack_id.clone()),
         },
     );
-    // TODO(git_safety_guard-99e.14): Wire up budget skip when EvaluationResult has the field
-    // collector.set_budget_skip(result.skipped_due_to_budget);
+    collector.set_budget_skip(result.skipped_due_to_budget);
 
     // Add match info if present
     if let Some(ref pattern) = result.pattern_info {

@@ -83,10 +83,9 @@ pub use allowlist::{
 pub use config::Config;
 pub use evaluator::{
     EvaluationDecision, EvaluationResult, LegacyDestructivePattern, LegacySafePattern, MatchSource,
-    MatchSpan, PatternMatch, evaluate_command, evaluate_command_with_legacy,
-    evaluate_command_with_pack_order,
-    // TODO(git_safety_guard-99e.14): Re-export when implemented:
-    // evaluate_command_with_deadline, evaluate_command_with_pack_order_deadline,
+    MatchSpan, PatternMatch, evaluate_command, evaluate_command_with_deadline,
+    evaluate_command_with_legacy, evaluate_command_with_pack_order,
+    evaluate_command_with_pack_order_deadline,
 };
 pub use hook::{HookInput, HookOutput, HookResult, HookSpecificOutput};
 pub use packs::{Pack, PackId, PackRegistry};
