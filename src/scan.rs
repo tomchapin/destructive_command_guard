@@ -1936,14 +1936,20 @@ fn extract_terraform_from_str(
                             }
                         }
 
-                        if let Some(heredoc_marker) = detect_heredoc_start(inner_trimmed, "command")
+                        if let Some((heredoc_marker, is_stripping)) =
+                            detect_heredoc_start(inner_trimmed, "command")
                         {
                             let heredoc_start = idx + 1;
                             idx += 1;
                             let mut heredoc_content = String::new();
 
                             while idx < lines.len() {
-                                let heredoc_line = lines[idx].trim();
+                                // For <<- (stripping), trim before comparing; for << match exactly
+                                let heredoc_line = if is_stripping {
+                                    lines[idx].trim()
+                                } else {
+                                    lines[idx]
+                                };
                                 if heredoc_line == heredoc_marker {
                                     break;
                                 }
@@ -2083,7 +2089,8 @@ fn extract_quoted_string(s: &str) -> Option<String> {
     None
 }
 
-fn detect_heredoc_start(line: &str, key: &str) -> Option<String> {
+/// Returns (marker, `is_stripping`) where `is_stripping` is true for `<<-` heredocs
+fn detect_heredoc_start(line: &str, key: &str) -> Option<(String, bool)> {
     if !line.starts_with(key) {
         return None;
     }
@@ -2097,12 +2104,12 @@ fn detect_heredoc_start(line: &str, key: &str) -> Option<String> {
     if let Some(marker) = after_eq.strip_prefix("<<-") {
         let marker = marker.trim();
         if !marker.is_empty() {
-            return Some(marker.to_string());
+            return Some((marker.to_string(), true)); // stripping heredoc
         }
     } else if let Some(marker) = after_eq.strip_prefix("<<") {
         let marker = marker.trim();
         if !marker.is_empty() {
-            return Some(marker.to_string());
+            return Some((marker.to_string(), false)); // non-stripping heredoc
         }
     }
     None
