@@ -407,19 +407,19 @@ The finding output includes a copy-paste allowlist command for convenience.
 
 ### Privacy and Redaction
 
-By default, scan uses `--redact quoted` to hide quoted strings that may contain secrets:
+Scan supports redaction of potentially sensitive content in output. Use `--redact quoted` to hide quoted strings that may contain secrets:
 
 ```
 # Original command:
 curl -H "Authorization: Bearer $TOKEN" https://api.example.com
 
-# Redacted output:
+# With --redact quoted:
 curl -H "..." https://api.example.com
 ```
 
 Options:
-- `--redact none`: Show full commands (not recommended in CI logs)
-- `--redact quoted`: Hide quoted strings (default)
+- `--redact none`: Show full commands (default)
+- `--redact quoted`: Hide quoted strings (recommended for CI logs)
 - `--redact aggressive`: Hide more potential secrets
 
 ### Configuration Reference
