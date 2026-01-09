@@ -483,6 +483,7 @@ fn redact_token(token: &str) -> String {
 /// - Shell-script extractor (`*.sh`)
 /// - Dockerfile extractor (`Dockerfile`, `*.dockerfile`, `Dockerfile.*`)
 /// - GitHub Actions workflow extractor (`.github/workflows/*.yml|*.yaml`)
+/// - Makefile extractor (`Makefile`)
 #[allow(clippy::missing_errors_doc)]
 pub fn scan_paths(
     paths: &[PathBuf],
@@ -531,8 +532,9 @@ pub fn scan_paths(
         let is_shell = is_shell_script_path(file);
         let is_docker = is_dockerfile_path(file);
         let is_actions = is_github_actions_workflow_path(file);
+        let is_makefile = is_makefile_path(file);
 
-        if !is_shell && !is_docker && !is_actions {
+        if !is_shell && !is_docker && !is_actions && !is_makefile {
             files_skipped += 1;
             continue;
         }
@@ -567,6 +569,14 @@ pub fn scan_paths(
 
         if is_actions {
             extracted.extend(extract_github_actions_workflow_from_str(
+                &file_label,
+                &content,
+                &ctx.enabled_keywords,
+            ));
+        }
+
+        if is_makefile {
+            extracted.extend(extract_makefile_from_str(
                 &file_label,
                 &content,
                 &ctx.enabled_keywords,
@@ -1217,6 +1227,66 @@ fn yaml_key_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
         .or_else(|| after_key.trim_start().strip_prefix(':'))?;
 
     Some(after_key.trim_start())
+}
+
+// ============================================================================
+// Makefile extractor (Makefile)
+// ============================================================================
+
+fn is_makefile_path(path: &Path) -> bool {
+    let file_name = path.file_name().and_then(std::ffi::OsStr::to_str);
+    file_name.is_some_and(|name| name.eq_ignore_ascii_case("makefile"))
+}
+
+fn extract_makefile_from_str(
+    file: &str,
+    content: &str,
+    enabled_keywords: &[&'static str],
+) -> Vec<ExtractedCommand> {
+    const EXTRACTOR_ID: &str = "makefile.recipe";
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+
+    while idx < lines.len() {
+        let raw_line = lines[idx];
+        if !raw_line.starts_with('\t') {
+            idx += 1;
+            continue;
+        }
+
+        let start_line = idx + 1;
+        let mut block = String::new();
+        let mut prev_continues = false;
+
+        while idx < lines.len() {
+            let line = lines[idx];
+            let is_recipe_line = line.starts_with('\t');
+
+            if !is_recipe_line && !prev_continues {
+                break;
+            }
+
+            if !block.is_empty() {
+                block.push('\n');
+            }
+            block.push_str(line);
+
+            prev_continues = line.trim_end().ends_with('\\');
+            idx += 1;
+        }
+
+        out.extend(extract_shell_script_with_offset_and_id(
+            file,
+            start_line,
+            &block,
+            enabled_keywords,
+            EXTRACTOR_ID,
+        ));
+    }
+
+    out
 }
 #[must_use]
 pub fn build_report(
@@ -2115,5 +2185,52 @@ jobs:
         let extracted =
             extract_github_actions_workflow_from_str(".github/workflows/ci.yml", content, &["rm"]);
         assert!(extracted.is_empty());
+    }
+
+    // ========================================================================
+    // Makefile extractor tests (git_safety_guard-scan.3.4)
+    // ========================================================================
+
+    #[test]
+    fn makefile_path_detection() {
+        use std::path::Path;
+        assert!(is_makefile_path(Path::new("Makefile")));
+        assert!(is_makefile_path(Path::new("makefile")));
+        assert!(!is_makefile_path(Path::new("Makefile.backup")));
+        assert!(!is_makefile_path(Path::new("build.mk")));
+        assert!(!is_makefile_path(Path::new("build.sh")));
+    }
+
+    #[test]
+    fn makefile_extractor_extracts_recipe_lines_only() {
+        let content = "VAR = rm -rf /\n\
+\n\
+all:\n\
+\tgit status\n\
+\t# rm -rf /\n\
+\trm -rf ./build\n";
+
+        let extracted = extract_makefile_from_str("Makefile", content, &["git", "rm"]);
+        assert_eq!(extracted.len(), 2);
+        assert_eq!(extracted[0].line, 4);
+        assert_eq!(extracted[0].extractor_id, "makefile.recipe");
+        assert_eq!(extracted[0].command, "git status");
+        assert_eq!(extracted[1].line, 6);
+        assert_eq!(extracted[1].extractor_id, "makefile.recipe");
+        assert_eq!(extracted[1].command, "rm -rf ./build");
+    }
+
+    #[test]
+    fn makefile_extractor_handles_backslash_continuations() {
+        // Makefile line continuations can be written without a leading tab on the continuation line.
+        let content = "all:\n\
+\tgit log \\\n\
+  --oneline\n";
+
+        let extracted = extract_makefile_from_str("Makefile", content, &["git"]);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].line, 2);
+        assert_eq!(extracted[0].extractor_id, "makefile.recipe");
+        assert_eq!(extracted[0].command, "git log --oneline");
     }
 }
