@@ -15,15 +15,15 @@
 //!
 //! # Performance Tiers
 //!
-//! | Tier | Path | Budget | Description |
-//! |------|------|--------|-------------|
-//! | 0 | Quick reject | < 1μs | Commands with no relevant keywords |
-//! | 1 | Fast path | < 100μs | Safe commands (git status, etc.) |
-//! | 2 | Pattern match | < 500μs | Commands requiring pattern evaluation |
-//! | 3 | Heredoc trigger | < 10μs | Checking if heredoc analysis needed |
-//! | 4 | Heredoc extract | < 500μs | Extracting heredoc content |
-//! | 5 | Language detect | < 50μs | Detecting embedded script language |
-//! | 6 | Full pipeline | < 15ms | Complete heredoc analysis path |
+//! | Tier | Path | Target | Warning | Panic |
+//! |------|------|--------|---------|-------|
+//! | 0 | Quick reject | < 1μs | < 5μs | > 50μs |
+//! | 1 | Fast path | < 75μs | < 150μs | > 500μs |
+//! | 2 | Pattern match | < 100μs | < 250μs | > 1ms |
+//! | 3 | Heredoc trigger | < 5μs | < 10μs | > 100μs |
+//! | 4 | Heredoc extract | < 200μs | < 500μs | > 2ms |
+//! | 5 | Language detect | < 20μs | < 50μs | > 200μs |
+//! | 6 | Full pipeline | < 5ms | < 15ms | > 50ms |
 //!
 //! # Absolute Maximum
 //!
