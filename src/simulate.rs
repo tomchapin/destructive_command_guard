@@ -906,6 +906,7 @@ pub struct SimulateJsonErrors {
 }
 
 /// Apply redaction and truncation to a command string.
+#[must_use]
 pub fn redact_and_truncate_command(cmd: &str, config: &SimulateOutputConfig) -> String {
     let redacted = match config.redact {
         ScanRedactMode::None => cmd.to_string(),
@@ -926,6 +927,8 @@ pub fn redact_and_truncate_command(cmd: &str, config: &SimulateOutputConfig) -> 
 }
 
 /// Format simulation result as pretty-printed text.
+#[must_use]
+#[allow(clippy::format_push_string)]
 pub fn format_pretty_output(result: &SimulationResult, config: &SimulateOutputConfig) -> String {
     let mut output = String::new();
     output.push_str("Simulation Results\n==================\n\n");
@@ -1008,13 +1011,17 @@ pub fn format_pretty_output(result: &SimulationResult, config: &SimulateOutputCo
     ));
     if result.parse_stats.stopped_at_limit {
         if let Some(ref limit) = result.parse_stats.limit_hit {
-            output.push_str(&format!("  Stopped at limit:   {:?}\n", limit));
+            output.push_str(&format!("  Stopped at limit:   {limit:?}\n"));
         }
     }
     output
 }
 
 /// Format simulation result as JSON.
+///
+/// # Errors
+///
+/// Returns an error if JSON serialization fails.
 pub fn format_json_output(
     result: SimulationResult,
     config: &SimulateOutputConfig,
@@ -1059,7 +1066,7 @@ pub fn format_json_output(
             malformed_count: result.parse_stats.malformed_count,
             ignored_count: result.parse_stats.ignored_count,
             stopped_at_limit: result.parse_stats.stopped_at_limit,
-            limit_hit: result.parse_stats.limit_hit.map(|l| format!("{:?}", l)),
+            limit_hit: result.parse_stats.limit_hit.map(|l| format!("{l:?}")),
         },
     };
 
