@@ -1908,6 +1908,59 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
         ],
     );
 
+    // Go patterns
+    patterns.insert(
+        ScriptLanguage::Go,
+        vec![
+            // Recursive deletion - always dangerous
+            CompiledPattern::new(
+                "os.RemoveAll($$$)".to_string(),
+                "heredoc.go.os_removeall".to_string(),
+                "os.RemoveAll() recursively deletes directories".to_string(),
+                Severity::Critical,
+                Some("Verify the target path carefully before running".to_string()),
+            ),
+            // File deletion
+            CompiledPattern::new(
+                "os.Remove($$$)".to_string(),
+                "heredoc.go.os_remove".to_string(),
+                "os.Remove() deletes files".to_string(),
+                Severity::High,
+                None,
+            ),
+            // Shell command execution - medium severity, refined at match time
+            CompiledPattern::new(
+                "exec.Command($$$)".to_string(),
+                "heredoc.go.exec_command".to_string(),
+                "exec.Command() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            // Combined patterns for common usage
+            CompiledPattern::new(
+                "exec.Command($$$).Run()".to_string(),
+                "heredoc.go.exec_command_run".to_string(),
+                "exec.Command().Run() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "exec.Command($$$).Output()".to_string(),
+                "heredoc.go.exec_command_output".to_string(),
+                "exec.Command().Output() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "exec.Command($$$).CombinedOutput()".to_string(),
+                "heredoc.go.exec_command_combined_output".to_string(),
+                "exec.Command().CombinedOutput() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+        ],
+    );
+
     patterns
 }
 

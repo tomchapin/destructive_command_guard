@@ -34,6 +34,10 @@ pub enum Command {
         /// Attempt to fix any issues found
         #[arg(long)]
         fix: bool,
+
+        /// Output format (pretty or json)
+        #[arg(long, short, value_enum, default_value_t = DoctorFormat::Pretty)]
+        format: DoctorFormat,
     },
 
     /// Manage allowlist entries (add, list, remove, validate)
@@ -468,6 +472,53 @@ pub enum AllowlistOutputFormat {
     Pretty,
     /// JSON output
     Json,
+}
+
+/// Output format for doctor command
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum DoctorFormat {
+    /// Human-readable colored output
+    #[default]
+    Pretty,
+    /// Structured JSON output for automation
+    Json,
+}
+
+/// Status of a doctor check
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorCheckStatus {
+    /// Check passed
+    Ok,
+    /// Check passed with warning
+    Warning,
+    /// Check failed
+    Error,
+    /// Check was skipped
+    Skipped,
+}
+
+/// A single doctor check result
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorCheck {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub status: DoctorCheckStatus,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub fixed: bool,
+}
+
+/// Full doctor report (for JSON output)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorReport {
+    pub schema_version: u32,
+    pub checks: Vec<DoctorCheck>,
+    pub issues: usize,
+    pub fixed: usize,
+    pub ok: bool,
 }
 
 /// Run the CLI command.
@@ -2301,13 +2352,13 @@ fn doctor(fix: bool) {
         println!("{}", "INVALID".red());
         issues += allowlist_diag.total_errors;
         for msg in &allowlist_diag.error_messages {
-            println!("  {}", msg);
+            println!("  {msg}");
         }
         println!("  → Run 'dcg allowlist validate' for details");
     } else if allowlist_diag.total_warnings > 0 {
         println!("{}", "WARNING".yellow());
         for msg in &allowlist_diag.warning_messages {
-            println!("  {}", msg);
+            println!("  {msg}");
         }
         println!("  → Run 'dcg allowlist validate' for details");
     } else if allowlist_diag.layers_found == 0 {
@@ -2319,7 +2370,11 @@ fn doctor(fix: bool) {
             "{} ({} layer{})",
             "OK".green(),
             allowlist_diag.layers_found,
-            if allowlist_diag.layers_found == 1 { "" } else { "s" }
+            if allowlist_diag.layers_found == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
     }
 
@@ -2933,15 +2988,13 @@ fn diagnose_allowlists() -> AllowlistDiagnostics {
                 if is_expired(expires_at) {
                     diag.total_warnings += 1;
                     diag.warning_messages.push(format!(
-                        "{layer_label}: entry {entry_num} expired ({})",
-                        expires_at
+                        "{layer_label}: entry {entry_num} expired ({expires_at})"
                     ));
                 }
             }
 
             // Check for risky regex patterns without acknowledgement
-            if matches!(entry.selector, AllowSelector::RegexPattern(_))
-                && !entry.risk_acknowledged
+            if matches!(entry.selector, AllowSelector::RegexPattern(_)) && !entry.risk_acknowledged
             {
                 diag.total_warnings += 1;
                 diag.warning_messages.push(format!(
