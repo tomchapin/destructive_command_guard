@@ -892,6 +892,10 @@ fn is_shell_function_declaration(words: &[String]) -> bool {
         return true;
     }
 
+    if words.get(1).is_some_and(|w| w == "()") {
+        return true;
+    }
+
     if first.contains("()") && words.get(1).is_some_and(|w| w == "{") {
         return true;
     }
@@ -1630,6 +1634,17 @@ export NOTE="git reset --hard" # also data
 
         assert_eq!(extracted.len(), 1);
         assert!(extracted[0].command.contains("rm -rf"));
+    }
+
+    #[test]
+    fn shell_extractor_skips_function_declaration_with_spaced_parens() {
+        let content = "git_reset () {\n}\n";
+        let extracted = extract_shell_script_from_str("test.sh", content, &["git"]);
+
+        assert!(
+            extracted.is_empty(),
+            "Expected no extracted commands, got: {extracted:?}"
+        );
     }
 
     #[test]
