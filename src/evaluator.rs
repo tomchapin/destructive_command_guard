@@ -1910,8 +1910,7 @@ mod tests {
         let compiled = config.overrides.compile();
         let allowlists = default_allowlists();
         let enabled_packs = config.enabled_pack_ids();
-        let keywords_vec = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
-        let keywords: Vec<&str> = keywords_vec.clone();
+        let keywords = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
 
         // Commands that should be blocked by docker pack
         let blocked_commands = ["docker system prune", "docker system prune -a"];
@@ -1946,8 +1945,7 @@ mod tests {
         let compiled = config.overrides.compile();
         let allowlists = default_allowlists();
         let enabled_packs = config.enabled_pack_ids();
-        let keywords_vec = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
-        let keywords: Vec<&str> = keywords_vec.clone();
+        let keywords = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
 
         let cmd = "docker system prune";
         let result = evaluate_command(cmd, &config, &keywords, &compiled, &allowlists);
@@ -2000,8 +1998,7 @@ mod tests {
         let compiled = config.overrides.compile();
         let allowlists = default_allowlists();
         let enabled_packs = config.enabled_pack_ids();
-        let keywords_vec = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
-        let keywords: Vec<&str> = keywords_vec.clone();
+        let keywords = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
 
         // Command with absolute path (should be normalized)
         let cmd = "/usr/bin/docker system prune";
@@ -2011,6 +2008,12 @@ mod tests {
         assert!(
             result.is_denied(),
             "Normalized docker prune should be blocked"
+        );
+        // Verify the docker pack matched (confirms normalization worked)
+        assert_eq!(
+            result.pack_id(),
+            Some("containers.docker"),
+            "Expected docker pack to match after normalization"
         );
     }
 
