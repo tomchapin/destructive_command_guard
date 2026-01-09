@@ -131,6 +131,8 @@ fn warn_unknown_hooks_toml_keys(value: &toml::Value, path: &str, warnings: &mut 
 pub enum ScanFormat {
     Pretty,
     Json,
+    /// GitHub-flavored Markdown for PR comments (uses `<details>` blocks)
+    Markdown,
 }
 
 /// Controls scan failure behavior (CI integration).

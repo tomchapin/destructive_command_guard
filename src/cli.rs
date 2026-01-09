@@ -1229,6 +1229,9 @@ fn handle_scan(
             let json = serde_json::to_string_pretty(&report)?;
             println!("{json}");
         }
+        crate::scan::ScanFormat::Markdown => {
+            print_scan_markdown(&report, top, truncate);
+        }
     }
 
     // Exit with appropriate code based on fail-on policy
@@ -1565,6 +1568,180 @@ fn print_scan_pretty(report: &crate::scan::ScanReport, verbose: bool, top: usize
     if verbose {
         // Additional verbose info could go here
     }
+}
+
+/// Print scan report as GitHub-flavored Markdown (for PR comments).
+///
+/// Output structure:
+/// - Summary header with findings counts
+/// - Findings grouped by file, each in a `<details>` block
+/// - Severity badges (error/warning/info)
+/// - Truncated command preview for readability
+fn print_scan_markdown(report: &crate::scan::ScanReport, top: usize, truncate: usize) {
+    use std::collections::BTreeMap;
+
+    // Header
+    println!("## DCG Scan Results\n");
+
+    if report.findings.is_empty() {
+        println!(":white_check_mark: **No findings** - all commands passed safety checks.\n");
+        print_scan_markdown_summary(report);
+        return;
+    }
+
+    // Summary badges
+    let error_count = report.summary.severities.error;
+    let warning_count = report.summary.severities.warning;
+    let info_count = report.summary.severities.info;
+
+    if error_count > 0 {
+        print!(":x: **{error_count} error(s)** ");
+    }
+    if warning_count > 0 {
+        print!(":warning: **{warning_count} warning(s)** ");
+    }
+    if info_count > 0 {
+        print!(":information_source: **{info_count} info** ");
+    }
+    println!("\n");
+
+    // Group findings by file
+    let mut by_file: BTreeMap<&str, Vec<&crate::scan::ScanFinding>> = BTreeMap::new();
+    for finding in &report.findings {
+        by_file.entry(&finding.file).or_default().push(finding);
+    }
+
+    // Limit total findings shown
+    let total_findings = report.findings.len();
+    let limit = if top == 0 { usize::MAX } else { top };
+    let mut shown = 0;
+
+    for (file, findings) in &by_file {
+        if shown >= limit {
+            break;
+        }
+
+        let file_errors = findings
+            .iter()
+            .filter(|f| matches!(f.severity, crate::scan::ScanSeverity::Error))
+            .count();
+        let file_warnings = findings
+            .iter()
+            .filter(|f| matches!(f.severity, crate::scan::ScanSeverity::Warning))
+            .count();
+
+        // Build summary line
+        let mut summary_parts = Vec::new();
+        if file_errors > 0 {
+            summary_parts.push(format!("{file_errors} error(s)"));
+        }
+        if file_warnings > 0 {
+            summary_parts.push(format!("{file_warnings} warning(s)"));
+        }
+        let summary_suffix = if summary_parts.is_empty() {
+            String::new()
+        } else {
+            format!(" - {}", summary_parts.join(", "))
+        };
+
+        println!("<details>");
+        println!("<summary><code>{file}</code>{summary_suffix}</summary>\n");
+
+        for finding in findings {
+            if shown >= limit {
+                println!("\n*... and more findings not shown (limit: {top})*");
+                break;
+            }
+
+            let severity_badge = match finding.severity {
+                crate::scan::ScanSeverity::Error => ":x:",
+                crate::scan::ScanSeverity::Warning => ":warning:",
+                crate::scan::ScanSeverity::Info => ":information_source:",
+            };
+
+            let decision_str = match finding.decision {
+                crate::scan::ScanDecision::Deny => "DENY",
+                crate::scan::ScanDecision::Warn => "WARN",
+                crate::scan::ScanDecision::Allow => "ALLOW",
+            };
+
+            let location = finding.col.map_or_else(
+                || finding.line.to_string(),
+                |col| format!("{}:{col}", finding.line),
+            );
+
+            // Truncate command for readability
+            let cmd_preview = truncate_for_markdown(&finding.extracted_command, truncate);
+
+            println!("{severity_badge} **{decision_str}** at line {location}");
+            println!("```");
+            println!("{cmd_preview}");
+            println!("```");
+
+            if let Some(ref rule_id) = finding.rule_id {
+                println!("- **Rule:** `{rule_id}`");
+            }
+            if let Some(ref reason) = finding.reason {
+                println!("- **Reason:** {reason}");
+            }
+            if let Some(ref suggestion) = finding.suggestion {
+                println!("- :bulb: **Suggestion:** {suggestion}");
+            }
+            println!();
+
+            shown += 1;
+        }
+
+        println!("</details>\n");
+    }
+
+    if shown < total_findings {
+        println!("*Showing {shown} of {total_findings} findings. Use `--top 0` to show all.*\n");
+    }
+
+    print_scan_markdown_summary(report);
+}
+
+/// Print markdown summary section.
+fn print_scan_markdown_summary(report: &crate::scan::ScanReport) {
+    println!("---\n");
+    println!("### Summary\n");
+    println!("| Metric | Value |");
+    println!("|--------|-------|");
+    println!("| Files scanned | {} |", report.summary.files_scanned);
+    println!("| Files skipped | {} |", report.summary.files_skipped);
+    println!(
+        "| Commands extracted | {} |",
+        report.summary.commands_extracted
+    );
+    println!("| Total findings | {} |", report.summary.findings_total);
+
+    if let Some(elapsed_ms) = report.summary.elapsed_ms {
+        println!("| Elapsed | {elapsed_ms} ms |");
+    }
+
+    if report.summary.max_findings_reached {
+        println!("\n:warning: *Max findings limit reached, scan stopped early.*");
+    }
+}
+
+/// Truncate a string for markdown display, respecting char boundaries.
+fn truncate_for_markdown(s: &str, max_len: usize) -> String {
+    if max_len == 0 || s.len() <= max_len {
+        return s.to_string();
+    }
+
+    // Find a safe truncation point (char boundary)
+    let mut end = max_len;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    if end == 0 {
+        return "...".to_string();
+    }
+
+    format!("{}...", &s[..end])
 }
 
 /// Handle the `dcg explain` subcommand.
@@ -3035,6 +3212,173 @@ mod tests {
     }
 
     // ========================================================================
+    // Allowlist E2E / Idempotence tests (git_safety_guard-1gt.2.5)
+    // ========================================================================
+
+    #[test]
+    fn allowlist_add_creates_file_and_entry() {
+        use tempfile::TempDir;
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("allowlist.toml");
+
+        // File should not exist yet
+        assert!(!path.exists());
+
+        // Load or create, add entry, write
+        let mut doc = load_or_create_allowlist_doc(&path).unwrap();
+        let rule = RuleId::parse("core.git:reset-hard").unwrap();
+        let entry = build_rule_entry(&rule, "test", None, &[]);
+        append_entry(&mut doc, entry);
+        write_allowlist(&path, &doc).unwrap();
+
+        // File should now exist with content
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("core.git:reset-hard"));
+        assert!(content.contains("reason = \"test\""));
+    }
+
+    #[test]
+    fn allowlist_add_is_idempotent_via_duplicate_check() {
+        use tempfile::TempDir;
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("allowlist.toml");
+
+        let rule = RuleId::parse("core.git:push-force").unwrap();
+
+        // Add first entry
+        let mut doc = load_or_create_allowlist_doc(&path).unwrap();
+        let entry = build_rule_entry(&rule, "first", None, &[]);
+        append_entry(&mut doc, entry);
+        write_allowlist(&path, &doc).unwrap();
+
+        // has_rule_entry should detect duplicate
+        let doc2 = load_or_create_allowlist_doc(&path).unwrap();
+        assert!(has_rule_entry(&doc2, &rule), "should detect existing rule");
+
+        // Count entries - should only have 1
+        let allow_array = doc2.get("allow").and_then(|v| v.as_array_of_tables());
+        assert_eq!(allow_array.map_or(0, toml_edit::ArrayOfTables::len), 1);
+    }
+
+    #[test]
+    fn allowlist_remove_deletes_matching_entry() {
+        use tempfile::TempDir;
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("allowlist.toml");
+
+        let rule = RuleId::parse("core.git:clean-force").unwrap();
+
+        // Add entry
+        let mut doc = load_or_create_allowlist_doc(&path).unwrap();
+        let entry = build_rule_entry(&rule, "to be removed", None, &[]);
+        append_entry(&mut doc, entry);
+        write_allowlist(&path, &doc).unwrap();
+
+        // Verify it exists
+        let doc_before = load_or_create_allowlist_doc(&path).unwrap();
+        assert!(has_rule_entry(&doc_before, &rule));
+
+        // Remove it
+        let mut doc_to_modify = load_or_create_allowlist_doc(&path).unwrap();
+        let removed = remove_rule_entry(&mut doc_to_modify, &rule);
+        assert!(removed, "should have removed entry");
+        write_allowlist(&path, &doc_to_modify).unwrap();
+
+        // Verify it's gone
+        let doc_after = load_or_create_allowlist_doc(&path).unwrap();
+        assert!(!has_rule_entry(&doc_after, &rule));
+    }
+
+    #[test]
+    fn allowlist_remove_nonexistent_returns_false() {
+        use tempfile::TempDir;
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("allowlist.toml");
+
+        let rule = RuleId::parse("core.git:nonexistent").unwrap();
+
+        // Create empty allowlist
+        let mut doc = load_or_create_allowlist_doc(&path).unwrap();
+        write_allowlist(&path, &doc).unwrap();
+
+        // Try to remove non-existent entry
+        let removed = remove_rule_entry(&mut doc, &rule);
+        assert!(!removed, "should return false for non-existent entry");
+    }
+
+    #[test]
+    fn allowlist_expired_entries_are_skipped_in_matching() {
+        use crate::allowlist::{AllowlistLayer, is_expired, parse_allowlist_toml};
+        use std::path::Path;
+
+        let toml = r#"
+            [[allow]]
+            rule = "core.git:reset-hard"
+            reason = "expired entry"
+            expires_at = "2020-01-01T00:00:00Z"
+        "#;
+
+        // Parsing creates the entry (doesn't filter it out)
+        let file = parse_allowlist_toml(AllowlistLayer::Project, Path::new("test"), toml);
+        assert_eq!(file.entries.len(), 1, "parser should create the entry");
+        assert!(
+            file.errors.is_empty(),
+            "parser should not report error for expired entry"
+        );
+
+        // But the entry should be marked as expired (skipped during matching)
+        assert!(
+            is_expired(&file.entries[0]),
+            "entry should be detected as expired"
+        );
+    }
+
+    #[test]
+    fn allowlist_regex_without_ack_is_invalid_for_matching() {
+        use crate::allowlist::{AllowlistLayer, has_required_risk_ack, parse_allowlist_toml};
+        use std::path::Path;
+
+        let toml = r#"
+            [[allow]]
+            pattern = "rm.*-rf"
+            reason = "risky pattern"
+        "#;
+
+        // Parsing creates the entry (doesn't add error)
+        let file = parse_allowlist_toml(AllowlistLayer::Project, Path::new("test"), toml);
+        assert_eq!(file.entries.len(), 1, "parser should create the entry");
+
+        // But the entry should fail the risk acknowledgement check (skipped during matching)
+        assert!(
+            !has_required_risk_ack(&file.entries[0]),
+            "regex without ack should fail risk check"
+        );
+    }
+
+    #[test]
+    fn allowlist_command_entry_duplicate_detection() {
+        use tempfile::TempDir;
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("allowlist.toml");
+
+        let command = "git push --force origin main";
+
+        // Add first entry
+        let mut doc = load_or_create_allowlist_doc(&path).unwrap();
+        let entry = build_command_entry(command, "first", None);
+        append_entry(&mut doc, entry);
+        write_allowlist(&path, &doc).unwrap();
+
+        // has_command_entry should detect duplicate
+        let doc2 = load_or_create_allowlist_doc(&path).unwrap();
+        assert!(
+            has_command_entry(&doc2, command),
+            "should detect existing command"
+        );
+    }
+
+    // ========================================================================
     // Scan CLI tests
     // ========================================================================
 
@@ -3614,5 +3958,58 @@ exclude = ["target/**"]
         assert!(!glob_match("ab*ab", "ab")); // path too short
         assert!(glob_match("ab*ab", "abab")); // exactly min_len, empty middle
         assert!(glob_match("ab*ab", "abXab")); // middle is "X"
+    }
+
+    // ========================================================================
+    // Markdown output tests (scan.5.2)
+    // ========================================================================
+
+    #[test]
+    fn truncate_for_markdown_short_strings_unchanged() {
+        assert_eq!(truncate_for_markdown("hello", 10), "hello");
+        assert_eq!(truncate_for_markdown("", 10), "");
+        assert_eq!(truncate_for_markdown("abc", 3), "abc");
+    }
+
+    #[test]
+    fn truncate_for_markdown_long_strings_truncated() {
+        assert_eq!(truncate_for_markdown("hello world", 5), "hello...");
+        assert_eq!(truncate_for_markdown("abcdefghij", 7), "abcdefg...");
+    }
+
+    #[test]
+    fn truncate_for_markdown_zero_max_no_truncation() {
+        // max_len=0 means unlimited
+        assert_eq!(truncate_for_markdown("hello world", 0), "hello world");
+    }
+
+    #[test]
+    fn truncate_for_markdown_unicode_boundary() {
+        // Test with multi-byte UTF-8 characters
+        // "café" = 5 bytes (c=1, a=1, f=1, é=2)
+        let result = truncate_for_markdown("café", 4);
+        // Should truncate at char boundary, not mid-character
+        assert!(result.is_ascii() || result.chars().all(|c| c.len_utf8() <= 4));
+        assert!(result.ends_with("...") || result == "caf...");
+    }
+
+    #[test]
+    fn scan_format_markdown_variant_exists() {
+        // Verify the Markdown variant is available and can be compared
+        assert_eq!(
+            crate::scan::ScanFormat::Markdown,
+            crate::scan::ScanFormat::Markdown
+        );
+    }
+
+    #[test]
+    fn cli_parse_scan_format_markdown() {
+        let cli = Cli::try_parse_from(["dcg", "scan", "--staged", "--format", "markdown"])
+            .expect("parse");
+        if let Some(Command::Scan(scan)) = cli.command {
+            assert_eq!(scan.format, Some(crate::scan::ScanFormat::Markdown));
+        } else {
+            panic!("Expected Scan command");
+        }
     }
 }
