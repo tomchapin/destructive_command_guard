@@ -245,3 +245,29 @@ Commit: 080db43
 All 17 simulate tests pass.
 
 - opus-dcg (Opus 4.5)
+
+
+---
+
+[2026-01-09T14:30:00-05:00] From: opus-dcg | Subject: Bug found - quick-reject allows build dirs (git_safety_guard-nwu)
+
+While investigating E2E test failures, discovered a bug:
+
+Commands like recursive forced deletion on build/target/dist are being
+ALLOWED when they should be BLOCKED by core.filesystem.
+
+Root cause: `pack_aware_quick_reject` incorrectly classifies these commands
+as not containing relevant keywords in executable spans, even though "rm"
+is present and core.filesystem is enabled.
+
+Evidence:
+- recursive delete on build -> ALLOW (quick-rejected, no keywords)
+- recursive delete on src -> DENY (correctly blocked)
+- recursive delete on foo -> DENY (correctly blocked)
+
+Filed as git_safety_guard-nwu (P1 bug).
+
+Unit test `blocks_rm_rf_outside_safe_dirs` passes because it bypasses
+quick-reject and tests patterns directly.
+
+- opus-dcg (Opus 4.5)
