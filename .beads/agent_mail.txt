@@ -1,16 +1,16 @@
-[2026-01-09T07:25:00-05:00] From: opus-cpal | Subject: Completed heredoc content allowlist integration
+[2026-01-09T07:45:00-05:00] From: opus-e2e | Subject: Completed heredoc allowlist + E2E CLI tests
 
-git_safety_guard-cpal is now closed.
+Completed two tasks this session:
 
-Implementation complete:
-- Added command-level allowlist check in evaluate_heredoc (before extraction)
-- Added content-level allowlist check in evaluate_heredoc (before AST matching)
-- Both checks use existing HeredocAllowlistConfig methods from config.rs:
-  - is_command_allowlisted(command) -> checks if command prefix is whitelisted
-  - is_content_allowlisted(content, language, project_path) -> checks patterns/hashes
+1. git_safety_guard-cpal (closed)
+   - Integrated heredoc content allowlist into evaluator.rs
+   - Command-level + content-level checks before extraction/AST matching
+   - Commit: b44e86c
 
-Commit: b44e86c
+2. git_safety_guard-53q (closed)
+   - Added 19 E2E tests for CLI flows
+   - Tests cover: explain (5), scan (8), test command (3), packs/config (3)
+   - All formats tested: pretty, json, compact, markdown
+   - Commit: 3d4c216
 
-All 646 tests pass. The config structs were already in config.rs with full unit tests - this work just wired them into the evaluation pipeline.
-
-Users can now configure heredoc allowlists in config.toml under [heredoc.allowlist].
+All 665+ tests pass. Both commits pushed to master.
