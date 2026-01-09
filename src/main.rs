@@ -24,11 +24,11 @@ use destructive_command_guard::evaluator::{
     EvaluationDecision, MatchSource, evaluate_command_with_pack_order_deadline,
 };
 use destructive_command_guard::hook;
-use destructive_command_guard::perf::{Deadline, HOOK_EVALUATION_BUDGET};
 use destructive_command_guard::load_default_allowlists;
 use destructive_command_guard::packs::{DecisionMode, REGISTRY};
 #[cfg(test)]
 use destructive_command_guard::packs::{normalize_command, pack_aware_quick_reject};
+use destructive_command_guard::perf::{Deadline, HOOK_EVALUATION_BUDGET};
 #[cfg(test)]
 use fancy_regex::Regex;
 #[cfg(test)]
@@ -489,9 +489,10 @@ fn main() {
     };
 
     if deadline.is_exceeded() {
-        if let (Some(log_file), Some(command)) =
-            (config.general.log_file.as_deref(), hook::extract_command(&hook_input))
-        {
+        if let (Some(log_file), Some(command)) = (
+            config.general.log_file.as_deref(),
+            hook::extract_command(&hook_input),
+        ) {
             let _ = hook::log_budget_skip(
                 log_file,
                 &command,

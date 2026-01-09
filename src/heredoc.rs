@@ -849,11 +849,19 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
             ExtractionResult::NoContent
         }
         (true, false) => {
-            warn!(elapsed_us, skip_count = skip_reasons.len(), "tier2_complete: skipped");
+            warn!(
+                elapsed_us,
+                skip_count = skip_reasons.len(),
+                "tier2_complete: skipped"
+            );
             ExtractionResult::Skipped(skip_reasons)
         }
         (false, true) => {
-            debug!(elapsed_us, count = extracted.len(), "tier2_complete: content extracted");
+            debug!(
+                elapsed_us,
+                count = extracted.len(),
+                "tier2_complete: content extracted"
+            );
             ExtractionResult::Extracted(extracted)
         }
         (false, false) => {
