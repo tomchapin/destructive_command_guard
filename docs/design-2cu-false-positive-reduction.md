@@ -220,6 +220,62 @@ fn test_performance_typical_commands() {
 
 ---
 
+### 7.1 E2E Coverage Matrix (Gap Analysis)
+
+This matrix captures current E2E coverage across hook + CLI + scan flows. It
+highlights gaps and the script(s) that provide coverage today.
+
+| Area | Hook | CLI | Scan | Evidence | Notes / Gaps |
+|------|------|-----|------|----------|--------------|
+| Hook allow/deny core (git/rm) | ✅ | — | — | `scripts/e2e_test.sh` | Broad allow/deny cases + path normalization |
+| Policy modes (warn/log/deny) | ✅ | — | — | `scripts/e2e_test.sh` | Uses `DCG_POLICY_DEFAULT_MODE` |
+| Pack enablement (non-core packs) | ✅ | — | — | `scripts/e2e_test.sh` | Docker/K8s/DB/infra packs via `DCG_PACKS` |
+| Non-Bash tools ignored | ✅ | — | — | `scripts/e2e_test.sh` | Read/Write/Edit/Grep/Glob |
+| Malformed hook input | ✅ | — | — | `scripts/e2e_test.sh` | Invalid JSON, missing fields |
+| Allowlist (project layer) | ✅ | — | — | `scripts/e2e_test.sh` | Rule allow/expire/conditions |
+| Allowlist layering (user/system) | ❌ | — | — | — | No precedence tests across project/user/system |
+| Config precedence (env/project/user/system) | ❌ | ❌ | ❌ | — | Needs hermetic HOME/XDG + temp project |
+| Config overrides (allow/block regex) | ❌ | ❌ | ❌ | — | No E2E that validates override regex behavior |
+| Doctor (install/uninstall + health) | — | ❌ | — | — | No E2E coverage for settings.json edits |
+| `dcg test` CLI | — | ❌ | — | — | No E2E for CLI test command behavior |
+| `dcg explain` formats | — | ❌ | — | — | Pretty/compact/json not validated |
+| `dcg simulate` formats | — | ❌ | — | — | Parser/output not exercised end-to-end |
+| Scan `--staged` (basic) | — | — | ✅ | `scripts/scan_precommit_e2e.sh` | Empty/destructive/data-only/mixed |
+| Scan `--git-diff` (CI) | — | — | ✅ | `scripts/scan_gitdiff_e2e.sh` | Add/modify/rename/delete + ordering |
+| Scan output schema + determinism | — | — | ✅ | `scripts/scan_precommit_e2e.sh` | JSON schema + ordering |
+| Scan extractors: GitHub Actions | — | — | ✅ | `scripts/scan_precommit_e2e.sh` | `run:` extraction |
+| Scan `--paths` include/exclude | — | — | ❌ | — | No E2E for include/exclude glob behavior |
+| Scan install/uninstall pre-commit | — | — | ❌ | — | No E2E for hook install/uninstall |
+| Scan limits (max_findings/size/truncate) | — | — | ❌ | — | No E2E for caps/truncation |
+| Heredoc detection (multi-lang) | ⚠️ | — | — | `scripts/e2e_test.sh` | Tests present but depend on heredoc epic |
+| Execution-context sanitization | ⚠️ | — | — | `scripts/e2e_test.sh` | Tests present but depend on t8x epic |
+
+**Gap priorities**
+1. **P0**: allowlist layering, config precedence, doctor install/uninstall (correctness + safety).
+2. **P1**: explain/simulate CLI coverage; scan limits + `--paths`; scan pre-commit install/uninstall.
+3. **P2**: expand path/quoting/encoding matrix + cross-platform variants; add `dcg test` CLI E2E.
+
+### 7.2 Proposed E2E Additions (Scripts/Tests)
+
+These are concrete, minimal E2E additions to close the gaps above.
+
+**P0 (must-have)**
+- Extend `scripts/e2e_test.sh` to cover allowlist layering (project/user/system precedence) using a temp repo + temp HOME/XDG_CONFIG_HOME. Rationale: allowlist correctness gates safe bypasses.
+- Add a config precedence E2E harness (new `scripts/e2e_config_precedence.sh` or a new section in `scripts/e2e_test.sh`). Rationale: env/project/user/system precedence bugs silently misconfigure protection.
+- Add a doctor E2E harness (e.g., `scripts/doctor_e2e.sh`) that operates on a temp `settings.json`. Rationale: installation health checks must be reliable and safe.
+
+**P1 (high)**
+- Add `dcg explain` E2E coverage (pretty/compact/json) and validate stable pack + pattern IDs. Rationale: users depend on explain for debugging and allowlist rules.
+- Add `dcg simulate` E2E coverage for parser and output formats, including truncation/redaction. Rationale: simulate is the onboarding/debugging path for large command corpora.
+- Add `dcg scan --paths` E2E coverage with include/exclude globs + fail-on thresholds. Rationale: CI workflows typically use paths, not just staged/diff.
+- Extend scan E2E to cover `max_findings`, `max_file_size`, and `truncate`. Rationale: limits are safety valves and must be deterministic.
+
+**P2 (nice-to-have)**
+- Expand path/quoting/encoding matrix in `scripts/e2e_test.sh` for path normalization and quoting edge cases. Rationale: reduces false positives and platform drift.
+- Add a small `dcg test` CLI E2E section to validate CLI parity with hook decisions. Rationale: parity prevents confusion during debugging.
+
+---
+
 ## 8. Remaining Work
 
 ### 8.1 High Priority
