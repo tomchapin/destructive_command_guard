@@ -50,6 +50,66 @@ pub struct Config {
     pub projects: std::collections::HashMap<String, ProjectConfig>,
 }
 
+// -----------------------------------------------------------------------------
+// Config file layering (presence-aware)
+// -----------------------------------------------------------------------------
+//
+// The public `Config` structs use `#[serde(default)]` to provide ergonomic
+// defaults when loading a *single* config file.
+//
+// For layered config precedence (system → user → project → env), we must also
+// preserve whether a field was present in TOML. Otherwise we lose information
+// about "explicitly set to default" vs "not set at all", which breaks the
+// "higher precedence wins" mental model (e.g. you could not set
+// `general.verbose=false` if a lower layer set it to true).
+//
+// To fix this, file configs are parsed into a partial/layer representation where
+// scalar fields are `Option<T>` and we only apply fields that are `Some(...)`.
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ConfigLayer {
+    general: Option<GeneralConfigLayer>,
+    packs: Option<PacksConfig>,
+    policy: Option<PolicyConfig>,
+    overrides: Option<OverridesConfig>,
+    heredoc: Option<HeredocConfig>,
+    logging: Option<LoggingConfigLayer>,
+    projects: Option<std::collections::HashMap<String, ProjectConfig>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct GeneralConfigLayer {
+    color: Option<String>,
+    log_file: Option<String>,
+    verbose: Option<bool>,
+    max_hook_input_bytes: Option<usize>,
+    max_command_bytes: Option<usize>,
+    max_findings_per_command: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct LoggingConfigLayer {
+    enabled: Option<bool>,
+    file: Option<String>,
+    format: Option<crate::logging::LogFormat>,
+    redaction: Option<RedactionConfigLayer>,
+    events: Option<LogEventFilterLayer>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RedactionConfigLayer {
+    enabled: Option<bool>,
+    mode: Option<crate::logging::RedactionMode>,
+    max_argument_len: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct LogEventFilterLayer {
+    deny: Option<bool>,
+    warn: Option<bool>,
+    allow: Option<bool>,
+}
+
 /// Heredoc and inline-script scanning configuration.
 ///
 /// This configuration controls Tier 1/2/3 heredoc scanning behavior. Because the
@@ -988,24 +1048,34 @@ impl Config {
         let mut config = Self::default();
 
         // Load system config (lowest priority of file configs)
-        if let Some(system_config) = Self::load_system_config() {
-            config.merge(system_config);
+        if let Some(system_config) = Self::load_system_config_layer() {
+            config.merge_layer(system_config);
         }
 
         // Load user config
-        if let Some(user_config) = Self::load_user_config() {
-            config.merge(user_config);
+        if let Some(user_config) = Self::load_user_config_layer() {
+            config.merge_layer(user_config);
         }
 
         // Load project config (if in a git repo)
-        if let Some(project_config) = Self::load_project_config() {
-            config.merge(project_config);
+        if let Some(project_config) = Self::load_project_config_layer() {
+            config.merge_layer(project_config);
         }
 
         // Apply environment variable overrides (highest priority)
         config.apply_env_overrides();
 
         config
+    }
+
+    /// Load a configuration *layer* from a specific file.
+    ///
+    /// Layers preserve field presence (via `Option<T>`) so higher-precedence
+    /// configs can explicitly set values back to defaults.
+    #[must_use]
+    fn load_layer_from_file(path: &Path) -> Option<ConfigLayer> {
+        let content = fs::read_to_string(path).ok()?;
+        toml::from_str(&content).ok()
     }
 
     /// Load configuration from a specific file.
@@ -1016,27 +1086,27 @@ impl Config {
     }
 
     /// Load system-wide configuration.
-    fn load_system_config() -> Option<Self> {
+    fn load_system_config_layer() -> Option<ConfigLayer> {
         let path = PathBuf::from("/etc/dcg").join(CONFIG_FILE_NAME);
-        Self::load_from_file(&path)
+        Self::load_layer_from_file(&path)
     }
 
     /// Load user configuration.
-    fn load_user_config() -> Option<Self> {
+    fn load_user_config_layer() -> Option<ConfigLayer> {
         let config_dir = dirs::config_dir()?;
         let path = config_dir.join("dcg").join(CONFIG_FILE_NAME);
-        Self::load_from_file(&path)
+        Self::load_layer_from_file(&path)
     }
 
     /// Load project-level configuration.
-    fn load_project_config() -> Option<Self> {
+    fn load_project_config_layer() -> Option<ConfigLayer> {
         // Try to find .dcg.toml in current dir or parent dirs
         let mut current = env::current_dir().ok()?;
 
         loop {
             let config_path = current.join(PROJECT_CONFIG_NAME);
             if config_path.exists() {
-                return Self::load_from_file(&config_path);
+                return Self::load_layer_from_file(&config_path);
             }
 
             // Also check for .git directory to find repo root
@@ -1044,7 +1114,7 @@ impl Config {
             if git_dir.exists() {
                 // We're at the repo root, check for config here
                 let config_path = current.join(PROJECT_CONFIG_NAME);
-                return Self::load_from_file(&config_path);
+                return Self::load_layer_from_file(&config_path);
             }
 
             // Move to parent directory
@@ -1056,112 +1126,148 @@ impl Config {
         None
     }
 
-    /// Merge another config into this one (other takes priority).
-    pub(crate) fn merge(&mut self, other: Self) {
-        // Merge general settings
-        if other.general.color != "auto" {
-            self.general.color = other.general.color;
-        }
-        if other.general.log_file.is_some() {
-            self.general.log_file = other.general.log_file;
-        }
-        if other.general.verbose {
-            self.general.verbose = true;
-        }
-        if other.general.max_hook_input_bytes.is_some() {
-            self.general.max_hook_input_bytes = other.general.max_hook_input_bytes;
-        }
-        if other.general.max_command_bytes.is_some() {
-            self.general.max_command_bytes = other.general.max_command_bytes;
-        }
-        if other.general.max_findings_per_command.is_some() {
-            self.general.max_findings_per_command = other.general.max_findings_per_command;
+    /// Merge another config layer into this one (other takes priority when set).
+    fn merge_layer(&mut self, other: ConfigLayer) {
+        if let Some(general) = other.general {
+            self.merge_general_layer(general);
         }
 
-        // Merge packs (append, don't replace)
-        self.packs.enabled.extend(other.packs.enabled);
-        self.packs.disabled.extend(other.packs.disabled);
+        if let Some(packs) = other.packs {
+            self.merge_packs_layer(packs);
+        }
 
-        // Merge policy config (other takes priority)
-        if other.policy.default_mode.is_some() {
-            self.policy.default_mode = other.policy.default_mode;
+        if let Some(policy) = other.policy {
+            self.merge_policy_layer(policy);
         }
-        if other.policy.observe_until.is_some() {
-            self.policy.observe_until = other.policy.observe_until;
-        }
-        self.policy.packs.extend(other.policy.packs);
-        self.policy.rules.extend(other.policy.rules);
 
-        // Merge overrides (append)
-        self.overrides.allow.extend(other.overrides.allow);
-        self.overrides.block.extend(other.overrides.block);
+        if let Some(overrides) = other.overrides {
+            self.merge_overrides_layer(overrides);
+        }
 
-        // Merge heredoc config (field-wise; other wins when set)
-        if other.heredoc.enabled.is_some() {
-            self.heredoc.enabled = other.heredoc.enabled;
+        if let Some(heredoc) = other.heredoc {
+            self.merge_heredoc_layer(heredoc);
         }
-        if other.heredoc.timeout_ms.is_some() {
-            self.heredoc.timeout_ms = other.heredoc.timeout_ms;
+
+        if let Some(logging) = other.logging {
+            self.merge_logging_layer(logging);
         }
-        if other.heredoc.max_body_bytes.is_some() {
-            self.heredoc.max_body_bytes = other.heredoc.max_body_bytes;
+
+        // Merge project configs
+        if let Some(projects) = other.projects {
+            self.projects.extend(projects);
         }
-        if other.heredoc.max_body_lines.is_some() {
-            self.heredoc.max_body_lines = other.heredoc.max_body_lines;
+    }
+
+    fn merge_general_layer(&mut self, general: GeneralConfigLayer) {
+        if let Some(color) = general.color {
+            self.general.color = color;
         }
-        if other.heredoc.max_heredocs.is_some() {
-            self.heredoc.max_heredocs = other.heredoc.max_heredocs;
+        if let Some(log_file) = general.log_file {
+            self.general.log_file = Some(log_file);
         }
-        if other.heredoc.languages.is_some() {
-            self.heredoc.languages = other.heredoc.languages;
+        if let Some(verbose) = general.verbose {
+            self.general.verbose = verbose;
         }
-        if other.heredoc.fallback_on_parse_error.is_some() {
-            self.heredoc.fallback_on_parse_error = other.heredoc.fallback_on_parse_error;
+        if let Some(max_hook_input_bytes) = general.max_hook_input_bytes {
+            self.general.max_hook_input_bytes = Some(max_hook_input_bytes);
         }
-        if other.heredoc.fallback_on_timeout.is_some() {
-            self.heredoc.fallback_on_timeout = other.heredoc.fallback_on_timeout;
+        if let Some(max_command_bytes) = general.max_command_bytes {
+            self.general.max_command_bytes = Some(max_command_bytes);
+        }
+        if let Some(max_findings_per_command) = general.max_findings_per_command {
+            self.general.max_findings_per_command = Some(max_findings_per_command);
+        }
+    }
+
+    fn merge_packs_layer(&mut self, packs: PacksConfig) {
+        self.packs.enabled.extend(packs.enabled);
+        self.packs.disabled.extend(packs.disabled);
+    }
+
+    fn merge_policy_layer(&mut self, policy: PolicyConfig) {
+        if policy.default_mode.is_some() {
+            self.policy.default_mode = policy.default_mode;
+        }
+        if policy.observe_until.is_some() {
+            self.policy.observe_until = policy.observe_until;
+        }
+        self.policy.packs.extend(policy.packs);
+        self.policy.rules.extend(policy.rules);
+    }
+
+    fn merge_overrides_layer(&mut self, overrides: OverridesConfig) {
+        self.overrides.allow.extend(overrides.allow);
+        self.overrides.block.extend(overrides.block);
+    }
+
+    fn merge_heredoc_layer(&mut self, heredoc: HeredocConfig) {
+        if heredoc.enabled.is_some() {
+            self.heredoc.enabled = heredoc.enabled;
+        }
+        if heredoc.timeout_ms.is_some() {
+            self.heredoc.timeout_ms = heredoc.timeout_ms;
+        }
+        if heredoc.max_body_bytes.is_some() {
+            self.heredoc.max_body_bytes = heredoc.max_body_bytes;
+        }
+        if heredoc.max_body_lines.is_some() {
+            self.heredoc.max_body_lines = heredoc.max_body_lines;
+        }
+        if heredoc.max_heredocs.is_some() {
+            self.heredoc.max_heredocs = heredoc.max_heredocs;
+        }
+        if heredoc.languages.is_some() {
+            self.heredoc.languages = heredoc.languages;
+        }
+        if heredoc.fallback_on_parse_error.is_some() {
+            self.heredoc.fallback_on_parse_error = heredoc.fallback_on_parse_error;
+        }
+        if heredoc.fallback_on_timeout.is_some() {
+            self.heredoc.fallback_on_timeout = heredoc.fallback_on_timeout;
         }
 
         // Merge heredoc allowlist (additive).
-        if let Some(other_allowlist) = other.heredoc.allowlist {
+        if let Some(other_allowlist) = heredoc.allowlist {
             if let Some(existing) = self.heredoc.allowlist.as_mut() {
                 existing.merge(&other_allowlist);
             } else {
                 self.heredoc.allowlist = Some(other_allowlist);
             }
         }
+    }
 
-        // Merge structured logging config (best-effort field-wise).
-        if other.logging.enabled {
-            self.logging.enabled = true;
+    fn merge_logging_layer(&mut self, logging: LoggingConfigLayer) {
+        if let Some(enabled) = logging.enabled {
+            self.logging.enabled = enabled;
         }
-        if other.logging.file.is_some() {
-            self.logging.file = other.logging.file.clone();
+        if let Some(file) = logging.file {
+            self.logging.file = Some(file);
         }
-        if other.logging.format != crate::logging::LogFormat::Text {
-            self.logging.format = other.logging.format;
+        if let Some(format) = logging.format {
+            self.logging.format = format;
         }
-        if other.logging.redaction.enabled {
-            self.logging.redaction.enabled = true;
+        if let Some(redaction) = logging.redaction {
+            if let Some(enabled) = redaction.enabled {
+                self.logging.redaction.enabled = enabled;
+            }
+            if let Some(mode) = redaction.mode {
+                self.logging.redaction.mode = mode;
+            }
+            if let Some(max_argument_len) = redaction.max_argument_len {
+                self.logging.redaction.max_argument_len = max_argument_len;
+            }
         }
-        if other.logging.redaction.mode != crate::logging::RedactionMode::Arguments {
-            self.logging.redaction.mode = other.logging.redaction.mode;
+        if let Some(events) = logging.events {
+            if let Some(deny) = events.deny {
+                self.logging.events.deny = deny;
+            }
+            if let Some(warn) = events.warn {
+                self.logging.events.warn = warn;
+            }
+            if let Some(allow) = events.allow {
+                self.logging.events.allow = allow;
+            }
         }
-        if other.logging.redaction.max_argument_len != 50 {
-            self.logging.redaction.max_argument_len = other.logging.redaction.max_argument_len;
-        }
-        if !other.logging.events.deny {
-            self.logging.events.deny = false;
-        }
-        if !other.logging.events.warn {
-            self.logging.events.warn = false;
-        }
-        if other.logging.events.allow {
-            self.logging.events.allow = true;
-        }
-
-        // Merge project configs
-        self.projects.extend(other.projects);
     }
 
     /// Apply environment variable overrides.
@@ -1672,14 +1778,14 @@ mod tests {
     #[test]
     fn test_config_merge() {
         let mut base = Config::default();
-        let other = Config {
-            packs: PacksConfig {
-                enabled: vec!["database.postgresql".to_string()],
-                disabled: vec![],
-            },
-            ..Default::default()
-        };
-        base.merge(other);
+        let layer: ConfigLayer = toml::from_str(
+            r#"
+[packs]
+enabled = ["database.postgresql"]
+"#,
+        )
+        .expect("layer parses");
+        base.merge_layer(layer);
         assert!(
             base.packs
                 .enabled
@@ -1695,22 +1801,88 @@ mod tests {
             ..Default::default()
         });
 
-        let other = Config {
-            heredoc: HeredocConfig {
+        let other = ConfigLayer {
+            heredoc: Some(HeredocConfig {
                 allowlist: Some(HeredocAllowlistConfig {
                     commands: vec!["cmd2".to_string()],
                     ..Default::default()
                 }),
                 ..Default::default()
-            },
+            }),
             ..Default::default()
         };
 
-        base.merge(other);
+        base.merge_layer(other);
 
         let allowlist = base.heredoc.allowlist.as_ref().expect("allowlist merged");
         assert!(allowlist.commands.contains(&"cmd1".to_string()));
         assert!(allowlist.commands.contains(&"cmd2".to_string()));
+    }
+
+    #[test]
+    fn test_config_merge_layer_general_verbose_can_be_disabled() {
+        let mut config = Config::default();
+        config.general.verbose = true;
+
+        let layer: ConfigLayer = toml::from_str(
+            r"
+[general]
+verbose = false
+",
+        )
+        .expect("layer parses");
+        config.merge_layer(layer);
+
+        assert!(!config.general.verbose);
+    }
+
+    #[test]
+    fn test_config_merge_layer_general_missing_fields_do_not_override() {
+        let mut config = Config::default();
+        config.general.verbose = true;
+
+        let layer: ConfigLayer = toml::from_str(
+            r#"
+[general]
+color = "never"
+"#,
+        )
+        .expect("layer parses");
+        config.merge_layer(layer);
+
+        assert!(config.general.verbose);
+        assert_eq!(config.general.color, "never");
+    }
+
+    #[test]
+    fn test_config_merge_layer_logging_is_reversible() {
+        let mut config = Config::default();
+        config.logging.enabled = true;
+        config.logging.format = crate::logging::LogFormat::Json;
+        config.logging.events.deny = false;
+        config.logging.events.warn = false;
+        config.logging.events.allow = true;
+
+        let layer: ConfigLayer = toml::from_str(
+            r#"
+[logging]
+enabled = false
+format = "text"
+
+[logging.events]
+deny = true
+warn = true
+allow = false
+"#,
+        )
+        .expect("layer parses");
+        config.merge_layer(layer);
+
+        assert!(!config.logging.enabled);
+        assert_eq!(config.logging.format, crate::logging::LogFormat::Text);
+        assert!(config.logging.events.deny);
+        assert!(config.logging.events.warn);
+        assert!(!config.logging.events.allow);
     }
 
     #[test]
@@ -2138,8 +2310,8 @@ mod tests {
             .packs
             .insert("core.git".to_string(), PolicyMode::Deny);
 
-        let other = Config {
-            policy: PolicyConfig {
+        let other = ConfigLayer {
+            policy: Some(PolicyConfig {
                 default_mode: Some(PolicyMode::Warn),
                 observe_until: ObserveUntil::parse("2030-01-01T00:00:00Z"),
                 packs: std::collections::HashMap::from([(
@@ -2150,11 +2322,11 @@ mod tests {
                     "core.git:reset-hard".to_string(),
                     PolicyMode::Log,
                 )]),
-            },
+            }),
             ..Default::default()
         };
 
-        base.merge(other);
+        base.merge_layer(other);
 
         // Other's default_mode should win
         assert_eq!(base.policy.default_mode, Some(PolicyMode::Warn));
