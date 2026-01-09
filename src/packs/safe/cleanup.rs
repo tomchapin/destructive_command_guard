@@ -147,10 +147,20 @@ fn create_safe_patterns() -> Vec<SafePattern> {
     let separate_f_then_r = format!(
         r"{prefix}(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR](?:\s+--)?\s+{safe_path_list}\s*$"
     );
-    let recursive_force_pattern =
-        format!(r"{prefix}.*--recursive.*--force(?:\s+--)?\s+{safe_path_list}\s*$");
-    let force_recursive_pattern =
-        format!(r"{prefix}.*--force.*--recursive(?:\s+--)?\s+{safe_path_list}\s*$");
+    // Long flag patterns: only allow other flags (not directory arguments) between
+    // --recursive and --force. This prevents commands like "rm --recursive foo --force target/"
+    // from being allowed (where "foo" would also be deleted).
+    //
+    // - flags_before: zero or more flags each followed by whitespace (comes after prefix's \s+)
+    // - flags_between: zero or more flags each preceded by whitespace (comes after --recursive)
+    let flags_before = r"(?:--?[a-zA-Z][-a-zA-Z0-9]*\s+)*";
+    let flags_between = r"(?:\s+--?[a-zA-Z][-a-zA-Z0-9]*)*";
+    let recursive_force_pattern = format!(
+        r"{prefix}{flags_before}--recursive{flags_between}\s+--force(?:\s+--)?\s+{safe_path_list}\s*$"
+    );
+    let force_recursive_pattern = format!(
+        r"{prefix}{flags_before}--force{flags_between}\s+--recursive(?:\s+--)?\s+{safe_path_list}\s*$"
+    );
 
     vec![
         make_safe_pattern("safe-cleanup-rf", &rf_pattern),
@@ -519,6 +529,65 @@ mod tests {
         assert!(
             !pack.matches_safe("rm -rf target/ /etc/"),
             "rm -rf target/ /etc/ should NOT be allowed (absolute path)"
+        );
+    }
+
+    #[test]
+    fn blocks_trailing_path_traversal() {
+        let pack = pack();
+        // Trailing .. should be blocked (would delete parent directory)
+        assert!(
+            !pack.matches_safe("rm -rf target/.."),
+            "rm -rf target/.. should NOT be allowed (path traversal)"
+        );
+        assert!(
+            !pack.matches_safe("rm -rf target/../"),
+            "rm -rf target/../ should NOT be allowed (path traversal)"
+        );
+        assert!(
+            !pack.matches_safe("rm -rf target/../foo"),
+            "rm -rf target/../foo should NOT be allowed (path traversal)"
+        );
+    }
+
+    #[test]
+    fn blocks_dirs_between_long_flags() {
+        let pack = pack();
+        // Security: directories between --recursive and --force must not be allowed,
+        // as they would also be deleted. Only other flags are permitted between them.
+        assert!(
+            !pack.matches_safe("rm --recursive foo --force target/"),
+            "rm --recursive foo --force target/ should NOT be allowed (foo between flags)"
+        );
+        assert!(
+            !pack.matches_safe("rm --recursive /etc --force target/"),
+            "rm --recursive /etc --force target/ should NOT be allowed (/etc between flags)"
+        );
+        assert!(
+            !pack.matches_safe("rm --force src --recursive target/"),
+            "rm --force src --recursive target/ should NOT be allowed (src between flags)"
+        );
+    }
+
+    #[test]
+    fn allows_flags_between_long_flags() {
+        let pack = pack();
+        // Other flags (not directories) between --recursive and --force are fine
+        assert!(
+            pack.matches_safe("rm --verbose --recursive --force target/"),
+            "rm --verbose --recursive --force target/ should be allowed"
+        );
+        assert!(
+            pack.matches_safe("rm --recursive --verbose --force target/"),
+            "rm --recursive --verbose --force target/ should be allowed"
+        );
+        assert!(
+            pack.matches_safe("rm --force --verbose --recursive target/"),
+            "rm --force --verbose --recursive target/ should be allowed"
+        );
+        assert!(
+            pack.matches_safe("rm -v --recursive --force target/"),
+            "rm -v --recursive --force target/ should be allowed"
         );
     }
 }
