@@ -133,16 +133,41 @@ impl CompiledRegex {
 
 /// Check if a pattern requires the backtracking engine.
 ///
-/// Returns `true` if the pattern contains lookahead or lookbehind assertions,
-/// which are not supported by the linear-time `regex` crate.
+/// Returns `true` if the pattern contains features not supported by the
+/// linear-time `regex` crate:
+/// - Lookahead: `(?=...)`, `(?!...)`
+/// - Lookbehind: `(?<=...)`, `(?<!...)`
+/// - Backreferences: `\1`, `\2`, etc.
+///
+/// Note: This is a heuristic based on syntax. Some edge cases (like `\1` in a
+/// character class or escaped in a string literal) may produce false positives,
+/// but false positives are safe (just use the slower engine unnecessarily).
 #[must_use]
 pub fn needs_backtracking_engine(pattern: &str) -> bool {
     // Lookahead: (?= positive, (?! negative
     // Lookbehind: (?<= positive, (?<! negative
-    pattern.contains("(?=")
+    if pattern.contains("(?=")
         || pattern.contains("(?!")
         || pattern.contains("(?<=")
         || pattern.contains("(?<!")
+    {
+        return true;
+    }
+
+    // Backreferences: \1 through \9 (and \10+ for 10+ capture groups)
+    // Check for \1-\9 which covers the vast majority of backreference usage
+    let bytes = pattern.as_bytes();
+    for i in 0..bytes.len().saturating_sub(1) {
+        if bytes[i] == b'\\' {
+            let next = bytes[i + 1];
+            // \1 through \9 are backreferences
+            if next.is_ascii_digit() && next != b'0' {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -183,24 +208,68 @@ mod tests {
 
     #[test]
     fn test_needs_backtracking_detection() {
+        // Simple patterns - linear engine
         assert!(!needs_backtracking_engine(r"simple"));
         assert!(!needs_backtracking_engine(r"git\s+status"));
+        assert!(!needs_backtracking_engine(r"\d+\.\d+")); // \d is NOT a backreference
+        assert!(!needs_backtracking_engine(r"foo\0bar")); // \0 is NOT a backreference
+
+        // Lookahead/lookbehind - backtracking needed
         assert!(needs_backtracking_engine(r"(?=lookahead)"));
         assert!(needs_backtracking_engine(r"(?!negative)"));
         assert!(needs_backtracking_engine(r"(?<=lookbehind)"));
         assert!(needs_backtracking_engine(r"(?<!negative-behind)"));
+
+        // Backreferences - backtracking needed
+        assert!(needs_backtracking_engine(r"(foo)\1"));
+        assert!(needs_backtracking_engine(r"(\w+)\s+\1"));
+        assert!(needs_backtracking_engine(r"(a)(b)\2\1"));
     }
 
     #[test]
-    fn test_find() {
+    fn test_backreference_pattern() {
+        // Backreferences should use backtracking engine
+        let re = CompiledRegex::new(r"(\w+)\s+\1").unwrap();
+        assert!(re.uses_backtracking());
+
+        // Should match repeated words
+        assert!(re.is_match("hello hello"));
+        assert!(re.is_match("the the"));
+        assert!(!re.is_match("hello world"));
+    }
+
+    #[test]
+    fn test_find_linear() {
         let re = CompiledRegex::new(r"rm").unwrap();
+        assert!(!re.uses_backtracking());
         assert_eq!(re.find("test rm command"), Some((5, 7)));
+        assert_eq!(re.find("no match"), None);
     }
 
     #[test]
-    fn test_replacen() {
+    fn test_find_backtracking() {
+        // Use lookahead pattern to force backtracking engine
+        let re = CompiledRegex::new(r"git(?=\s+push)").unwrap();
+        assert!(re.uses_backtracking());
+        assert_eq!(re.find("run git push"), Some((4, 7)));
+        assert_eq!(re.find("git status"), None); // lookahead fails
+    }
+
+    #[test]
+    fn test_replacen_linear() {
         let re = CompiledRegex::new(r"foo").unwrap();
+        assert!(!re.uses_backtracking());
         assert_eq!(re.replacen("foo bar foo", 1, "baz"), "baz bar foo");
+        assert_eq!(re.replacen("foo bar foo", 0, "baz"), "baz bar baz"); // 0 = all
+    }
+
+    #[test]
+    fn test_replacen_backtracking() {
+        // Use backreference pattern to force backtracking engine
+        let re = CompiledRegex::new(r"(\w+)\s+\1").unwrap();
+        assert!(re.uses_backtracking());
+        // Replace duplicate words with "DUPE"
+        assert_eq!(re.replacen("the the cat", 1, "DUPE"), "DUPE cat");
     }
 
     // ==========================================================================
