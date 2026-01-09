@@ -37,7 +37,7 @@ use destructive_command_guard::hook::HookInput;
 #[cfg(test)]
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::io::{self, BufRead, IsTerminal};
+use std::io::{self, IsTerminal, Read};
 #[cfg(test)]
 use std::sync::LazyLock;
 
@@ -457,16 +457,30 @@ fn main() {
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
 
-    // Read stdin with a reasonable capacity hint for typical hook input.
+    // Read stdin with size limit to prevent DoS from pathological inputs.
     // Hook input is typically ~100-200 bytes of JSON.
+    let max_input_bytes = config.general.max_hook_input_bytes();
     let mut input = String::with_capacity(256);
+    #[allow(clippy::significant_drop_tightening)]
     {
         let stdin = io::stdin();
-        let mut handle = stdin.lock();
-        if handle.read_line(&mut input).is_err() {
+        let handle = stdin.lock();
+        // Use take() to enforce size limit on stdin read
+        let mut limited = handle.take(max_input_bytes as u64 + 1);
+        if limited.read_to_string(&mut input).is_err() {
             return;
         }
     } // handle dropped here, releasing the lock early
+
+    // Check if input exceeded the limit (fail-open: allow and warn)
+    if input.len() > max_input_bytes {
+        eprintln!(
+            "[dcg] Warning: stdin input ({} bytes) exceeds limit ({} bytes); allowing command (fail-open)",
+            input.len(),
+            max_input_bytes
+        );
+        return;
+    }
 
     // Fast path: parse JSON directly from the input buffer
     let Ok(hook_input) = serde_json::from_str::<HookInput>(&input) else {
@@ -491,6 +505,17 @@ fn main() {
     };
 
     if command.is_empty() {
+        return;
+    }
+
+    // Check command size limit (fail-open: allow and warn)
+    let max_command_bytes = config.general.max_command_bytes();
+    if command.len() > max_command_bytes {
+        eprintln!(
+            "[dcg] Warning: command ({} bytes) exceeds limit ({} bytes); allowing command (fail-open)",
+            command.len(),
+            max_command_bytes
+        );
         return;
     }
 
@@ -1780,6 +1805,51 @@ mod tests {
                 !result.blocked,
                 "docker ps should be allowed (matches safe pattern)"
             );
+        }
+    }
+
+    // ========================================================================
+    // Input size limit tests (git_safety_guard-99e.10)
+    // ========================================================================
+
+    mod input_limit_tests {
+        use super::*;
+
+        #[test]
+        fn config_default_limits() {
+            let config = Config::default();
+            // Verify defaults are set correctly
+            assert_eq!(config.general.max_hook_input_bytes(), 256 * 1024);
+            assert_eq!(config.general.max_command_bytes(), 64 * 1024);
+            assert_eq!(config.general.max_findings_per_command(), 100);
+        }
+
+        #[test]
+        fn config_custom_limits() {
+            let mut config = Config::default();
+            config.general.max_hook_input_bytes = Some(128 * 1024);
+            config.general.max_command_bytes = Some(32 * 1024);
+            config.general.max_findings_per_command = Some(50);
+
+            assert_eq!(config.general.max_hook_input_bytes(), 128 * 1024);
+            assert_eq!(config.general.max_command_bytes(), 32 * 1024);
+            assert_eq!(config.general.max_findings_per_command(), 50);
+        }
+
+        #[test]
+        #[allow(clippy::assertions_on_constants)]
+        fn default_constants_are_reasonable() {
+            use destructive_command_guard::config::{
+                DEFAULT_MAX_COMMAND_BYTES, DEFAULT_MAX_FINDINGS_PER_COMMAND,
+                DEFAULT_MAX_HOOK_INPUT_BYTES,
+            };
+            // Verify constants are reasonable sizes (compile-time validations)
+            assert!(DEFAULT_MAX_HOOK_INPUT_BYTES >= 64 * 1024); // At least 64KB
+            assert!(DEFAULT_MAX_HOOK_INPUT_BYTES <= 1024 * 1024); // At most 1MB
+            assert!(DEFAULT_MAX_COMMAND_BYTES >= 16 * 1024); // At least 16KB
+            assert!(DEFAULT_MAX_COMMAND_BYTES <= 256 * 1024); // At most 256KB
+            assert!(DEFAULT_MAX_FINDINGS_PER_COMMAND >= 10); // At least 10
+            assert!(DEFAULT_MAX_FINDINGS_PER_COMMAND <= 1000); // At most 1000
         }
     }
 }

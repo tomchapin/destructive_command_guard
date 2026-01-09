@@ -1146,7 +1146,7 @@ fn handle_simulate_command(
     sim: SimulateCommand,
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::simulate::{run_simulation_from_reader, SimulationConfig, SimulateLimits};
+    use crate::simulate::{SimulateLimits, SimulationConfig, run_simulation_from_reader};
     use std::fs::File;
     use std::io::{self, BufReader};
 
@@ -1199,10 +1199,7 @@ fn handle_simulate_command(
                         crate::simulate::SimulateDecision::Warn => "warn",
                         crate::simulate::SimulateDecision::Deny => "DENY",
                     };
-                    println!(
-                        "  {:>5} x {} [{}]",
-                        rule.count, rule.rule_id, decision_str
-                    );
+                    println!("  {:>5} x {} [{}]", rule.count, rule.rule_id, decision_str);
                     if verbose {
                         for ex in &rule.exemplars {
                             println!(
@@ -1226,8 +1223,14 @@ fn handle_simulate_command(
 
             println!("Parse Statistics:");
             println!("  Lines read:         {}", result.parse_stats.lines_read);
-            println!("  Commands extracted: {}", result.parse_stats.commands_extracted);
-            println!("  Malformed lines:    {}", result.parse_stats.malformed_count);
+            println!(
+                "  Commands extracted: {}",
+                result.parse_stats.commands_extracted
+            );
+            println!(
+                "  Malformed lines:    {}",
+                result.parse_stats.malformed_count
+            );
             println!("  Ignored lines:      {}", result.parse_stats.ignored_count);
             if result.parse_stats.stopped_at_limit {
                 if let Some(ref limit) = result.parse_stats.limit_hit {

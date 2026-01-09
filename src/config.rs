@@ -174,7 +174,27 @@ pub struct GeneralConfig {
 
     /// Whether to show verbose output.
     pub verbose: bool,
+
+    /// Maximum bytes to read from stdin in hook mode.
+    /// Commands exceeding this limit are allowed (fail-open) with a warning.
+    /// Default: 262144 (256 KiB).
+    pub max_hook_input_bytes: Option<usize>,
+
+    /// Maximum bytes for command string after extraction from JSON.
+    /// Commands exceeding this limit are allowed (fail-open) with a warning.
+    /// Default: 65536 (64 KiB).
+    pub max_command_bytes: Option<usize>,
+
+    /// Maximum findings to report per command.
+    /// Limits output size and processing time for pathological inputs.
+    /// Default: 100.
+    pub max_findings_per_command: Option<usize>,
 }
+
+/// Default limits for input size (used when not configured).
+pub const DEFAULT_MAX_HOOK_INPUT_BYTES: usize = 256 * 1024; // 256 KiB
+pub const DEFAULT_MAX_COMMAND_BYTES: usize = 64 * 1024; // 64 KiB
+pub const DEFAULT_MAX_FINDINGS_PER_COMMAND: usize = 100;
 
 impl Default for GeneralConfig {
     fn default() -> Self {
@@ -182,7 +202,32 @@ impl Default for GeneralConfig {
             color: "auto".to_string(),
             log_file: None,
             verbose: false,
+            max_hook_input_bytes: None,
+            max_command_bytes: None,
+            max_findings_per_command: None,
         }
+    }
+}
+
+impl GeneralConfig {
+    /// Get max hook input bytes (with default fallback).
+    #[must_use]
+    pub fn max_hook_input_bytes(&self) -> usize {
+        self.max_hook_input_bytes
+            .unwrap_or(DEFAULT_MAX_HOOK_INPUT_BYTES)
+    }
+
+    /// Get max command bytes (with default fallback).
+    #[must_use]
+    pub fn max_command_bytes(&self) -> usize {
+        self.max_command_bytes.unwrap_or(DEFAULT_MAX_COMMAND_BYTES)
+    }
+
+    /// Get max findings per command (with default fallback).
+    #[must_use]
+    pub fn max_findings_per_command(&self) -> usize {
+        self.max_findings_per_command
+            .unwrap_or(DEFAULT_MAX_FINDINGS_PER_COMMAND)
     }
 }
 
@@ -704,7 +749,7 @@ impl Config {
     }
 
     /// Merge another config into this one (other takes priority).
-    fn merge(&mut self, other: Self) {
+    pub(crate) fn merge(&mut self, other: Self) {
         // Merge general settings
         if other.general.color != "auto" {
             self.general.color = other.general.color;
@@ -714,6 +759,15 @@ impl Config {
         }
         if other.general.verbose {
             self.general.verbose = true;
+        }
+        if other.general.max_hook_input_bytes.is_some() {
+            self.general.max_hook_input_bytes = other.general.max_hook_input_bytes;
+        }
+        if other.general.max_command_bytes.is_some() {
+            self.general.max_command_bytes = other.general.max_command_bytes;
+        }
+        if other.general.max_findings_per_command.is_some() {
+            self.general.max_findings_per_command = other.general.max_findings_per_command;
         }
 
         // Merge packs (append, don't replace)
