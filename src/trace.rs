@@ -244,6 +244,8 @@ pub struct TraceCollector {
     allowlist_info: Option<AllowlistInfo>,
     /// Pack summary (set during evaluation).
     pack_summary: Option<PackSummary>,
+    /// Whether evaluation skipped deeper analysis due to a budget overrun.
+    skipped_due_to_budget: bool,
 }
 
 impl TraceCollector {
@@ -261,6 +263,7 @@ impl TraceCollector {
             match_info: None,
             allowlist_info: None,
             pack_summary: None,
+            skipped_due_to_budget: false,
         }
     }
 
@@ -314,6 +317,11 @@ impl TraceCollector {
         self.pack_summary = Some(summary);
     }
 
+    /// Mark whether evaluation skipped deeper analysis due to budget.
+    pub fn set_budget_skip(&mut self, skipped: bool) {
+        self.skipped_due_to_budget = skipped;
+    }
+
     /// Finish collection and produce the final trace.
     #[allow(clippy::cast_possible_truncation)] // Microseconds fit in u64
     #[must_use]
@@ -324,7 +332,7 @@ impl TraceCollector {
             normalized_command: self.normalized_command,
             sanitized_command: self.sanitized_command,
             decision,
-            skipped_due_to_budget: false,
+            skipped_due_to_budget: self.skipped_due_to_budget,
             total_duration_us,
             steps: self.steps,
             match_info: self.match_info,
