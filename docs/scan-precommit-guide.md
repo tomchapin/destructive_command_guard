@@ -176,7 +176,7 @@ Many destructive commands have safer alternatives:
 |------------|-----|
 | `git reset --hard` | `git stash` or targeted `git checkout` |
 | `git push --force` | `git push --force-with-lease` |
-| `rm -rf ./build` | `rm -rf ./build/` (with trailing slash) or safer cleanup patterns |
+| `rm -rf ./build` | Use build tool's clean (e.g., `cargo clean`, `make clean`) |
 | `docker system prune -af` | `docker image prune --filter "until=24h"` |
 
 ### Option 2: Investigate with explain
@@ -248,7 +248,7 @@ redact = "quoted"   # Redact quoted strings: rm -rf "[REDACTED]"
    ```toml
    [scan]
    truncate = 100       # Truncate long command output
-   max_findings = 50    # Limit findings per file
+   max_findings = 50    # Limit total findings per scan
    ```
 3. **Use JSON format** for machine parsing in CI:
    ```toml
@@ -318,18 +318,14 @@ CLI flags always take precedence over `.dcg/hooks.toml`.
 
 ## Hook Manager Examples
 
-### Husky (npm)
+### Husky (npm, v8+)
 
-```json
-// package.json
-{
-  "husky": {
-    "hooks": {
-      "pre-commit": "dcg scan --staged"
-    }
-  }
-}
+```bash
+# .husky/pre-commit
+dcg scan --staged
 ```
+
+Create with: `npx husky add .husky/pre-commit "dcg scan --staged"`
 
 ### Lefthook
 

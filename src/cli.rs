@@ -2132,7 +2132,12 @@ fn doctor(fix: bool) {
             if fix {
                 let config_path = config_path();
                 if config_path.exists() {
-                    println!("  Config path exists but was not loaded (check file format)");
+                    // File exists but wasn't loaded - could be empty, unreadable, or invalid
+                    println!(
+                        "  {} exists but wasn't loaded (check permissions/format)",
+                        config_path.display()
+                    );
+                    issues += 1;
                 } else {
                     println!("  Creating default config...");
                     if let Some(parent) = config_path.parent() {
