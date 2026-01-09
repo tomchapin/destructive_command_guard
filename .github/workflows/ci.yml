@@ -126,9 +126,9 @@ jobs:
           EVALUATOR_MIN="80.0"
           HOOK_MIN="80.0"
 
-          overall=$(grep 'TOTAL' coverage-summary.txt | grep -Eo '[0-9]+\.[0-9]+%' | tail -1 | tr -d '%' || echo "")
-          evaluator=$(awk '$1 ~ /src\/evaluator\.rs$/ {print $2}' coverage-summary.txt | tr -d '%' | tail -1 || true)
-          hook=$(awk '$1 ~ /src\/hook\.rs$/ {print $2}' coverage-summary.txt | tr -d '%' | tail -1 || true)
+          overall=$(grep 'TOTAL' coverage-summary.txt | grep -Eo '[0-9]+(\.[0-9]+)?%' | tail -1 | tr -d '%' || echo "")
+          evaluator=$(awk '$0 ~ /src\/evaluator\.rs/ {for (i=NF; i>=1; i--) if ($i ~ /%$/) {print $i; break}}' coverage-summary.txt | tr -d '%' | tail -1 || true)
+          hook=$(awk '$0 ~ /src\/hook\.rs/ {for (i=NF; i>=1; i--) if ($i ~ /%$/) {print $i; break}}' coverage-summary.txt | tr -d '%' | tail -1 || true)
 
           echo "Coverage thresholds:"
           echo "  overall >= ${OVERALL_MIN}%"
@@ -148,7 +148,7 @@ jobs:
           if [ -z "$overall" ]; then
             echo "::error::Failed to parse TOTAL coverage from coverage-summary.txt"
             failures=$((failures + 1))
-          elif [ "$(echo "$overall < $OVERALL_MIN" | bc -l)" -eq 1 ]; then
+          elif awk -v v="$overall" -v min="$OVERALL_MIN" 'BEGIN{exit !(v+0 < min+0)}'; then
             echo "::error::Overall coverage ${overall}% is below ${OVERALL_MIN}%"
             failures=$((failures + 1))
           fi
@@ -156,7 +156,7 @@ jobs:
           if [ -z "$evaluator" ]; then
             echo "::error::Failed to parse src/evaluator.rs coverage from coverage-summary.txt"
             failures=$((failures + 1))
-          elif [ "$(echo "$evaluator < $EVALUATOR_MIN" | bc -l)" -eq 1 ]; then
+          elif awk -v v="$evaluator" -v min="$EVALUATOR_MIN" 'BEGIN{exit !(v+0 < min+0)}'; then
             echo "::error::src/evaluator.rs coverage ${evaluator}% is below ${EVALUATOR_MIN}%"
             failures=$((failures + 1))
           fi
@@ -164,7 +164,7 @@ jobs:
           if [ -z "$hook" ]; then
             echo "::error::Failed to parse src/hook.rs coverage from coverage-summary.txt"
             failures=$((failures + 1))
-          elif [ "$(echo "$hook < $HOOK_MIN" | bc -l)" -eq 1 ]; then
+          elif awk -v v="$hook" -v min="$HOOK_MIN" 'BEGIN{exit !(v+0 < min+0)}'; then
             echo "::error::src/hook.rs coverage ${hook}% is below ${HOOK_MIN}%"
             failures=$((failures + 1))
           fi
