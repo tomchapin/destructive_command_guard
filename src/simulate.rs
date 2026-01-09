@@ -592,7 +592,7 @@ pub struct SimulationAggregator {
     pack_counts: HashMap<String, HashMap<SimulateDecision, usize>>,
 }
 
-/// Builder for RuleStats (accumulates exemplars).
+/// Builder for `RuleStats` (accumulates exemplars).
 #[derive(Debug)]
 struct RuleStatsBuilder {
     pack_id: String,
@@ -624,7 +624,9 @@ impl RuleStatsBuilder {
         self.count += 1;
         if self.exemplars.len() < self.exemplar_limit {
             let truncated = if command.len() > max_len {
-                let mut end = max_len;
+                // Account for "..." suffix (3 chars) so total doesn't exceed max_len
+                let target = max_len.saturating_sub(3);
+                let mut end = target;
                 while end > 0 && !command.is_char_boundary(end) {
                     end -= 1;
                 }
@@ -654,6 +656,7 @@ impl RuleStatsBuilder {
 
 impl SimulationAggregator {
     /// Create a new aggregator with the given configuration.
+    #[must_use]
     pub fn new(config: SimulationConfig) -> Self {
         Self {
             config,
@@ -732,6 +735,7 @@ impl SimulationAggregator {
     }
 
     /// Finalize aggregation and produce sorted results.
+    #[must_use]
     pub fn finalize(self, parse_stats: ParseStats) -> SimulationResult {
         let mut rules: Vec<RuleStats> = self
             .rule_builders
@@ -820,6 +824,10 @@ where
 }
 
 /// Run simulation from a reader (convenience wrapper).
+///
+/// # Errors
+///
+/// Returns `ParseError` if the input cannot be parsed.
 pub fn run_simulation_from_reader<R: std::io::Read>(
     reader: R,
     limits: SimulateLimits,
@@ -1211,6 +1219,46 @@ echo world
         assert_eq!(result.rules[0].exemplars[0].line_number, 1);
         assert_eq!(result.rules[0].exemplars[1].command, "cmd2");
         assert_eq!(result.rules[0].exemplars[1].line_number, 2);
+    }
+
+    #[test]
+    fn exemplar_truncation_respects_max_len() {
+        let config = SimulationConfig {
+            exemplar_limit: 1,
+            max_exemplar_command_len: 10, // Total should be <= 10 chars
+            include_allowlisted: true,
+        };
+        let mut agg = SimulationAggregator::new(config);
+
+        // Command is 20 chars, should be truncated to fit within 10 chars including "..."
+        agg.record(
+            "12345678901234567890",
+            1,
+            &EvaluationResult::denied_by_pack_pattern(
+                "pack.a",
+                "rule1",
+                "test",
+                crate::packs::Severity::Critical,
+            ),
+        );
+
+        let parse_stats = ParseStats::default();
+        let result = agg.finalize(parse_stats);
+
+        // Truncated command should be at most max_exemplar_command_len (10) chars
+        let exemplar = &result.rules[0].exemplars[0];
+        assert!(
+            exemplar.command.len() <= 10,
+            "Expected at most 10 chars, got {}: '{}'",
+            exemplar.command.len(),
+            exemplar.command
+        );
+        assert!(
+            exemplar.command.ends_with("..."),
+            "Expected ellipsis, got: '{}'",
+            exemplar.command
+        );
+        assert_eq!(exemplar.original_length, 20);
     }
 
     #[test]
