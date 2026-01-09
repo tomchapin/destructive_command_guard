@@ -576,7 +576,8 @@ impl PackRegistry {
             "database" => 7,
             "package_managers" => 8,
             "strict_git" => 9,
-            _ => 10, // Unknown categories go last
+            "cicd" => 10, // CI/CD tools (GitHub Actions, etc.)
+            _ => 11,      // Unknown categories go last
         }
     }
 
@@ -1514,8 +1515,11 @@ mod tests {
         // Strict git should be tier 9
         assert_eq!(PackRegistry::pack_tier("strict_git"), 9);
 
-        // Unknown should be tier 10
-        assert_eq!(PackRegistry::pack_tier("unknown.pack"), 10);
+        // CI/CD should be tier 10
+        assert_eq!(PackRegistry::pack_tier("cicd.github_actions"), 10);
+
+        // Unknown should be tier 11
+        assert_eq!(PackRegistry::pack_tier("unknown.pack"), 11);
     }
 
     /// Test that `expand_enabled_ordered` returns packs in deterministic order.
