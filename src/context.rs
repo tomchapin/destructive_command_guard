@@ -614,11 +614,9 @@ pub static SAFE_STRING_REGISTRY: SafeStringRegistry = SafeStringRegistry {
         SafeFlagEntry::long("bd", "--title"),
         SafeFlagEntry::long("bd", "--notes"),
         SafeFlagEntry::long("bd", "--reason"),
-        // Search tools - patterns are data, not executed
+        // Search tools - patterns are data, not executed (only pattern-supplying flags)
         SafeFlagEntry::both("grep", "-e", "--regexp"),
-        SafeFlagEntry::both("grep", "-F", "--fixed-strings"),
         SafeFlagEntry::both("rg", "-e", "--regexp"),
-        SafeFlagEntry::long("rg", "--fixed-strings"),
         // GitHub CLI - titles and bodies are documentation
         SafeFlagEntry::both("gh", "-t", "--title"),
         SafeFlagEntry::both("gh", "-b", "--body"),
@@ -810,6 +808,21 @@ pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
 
                 // For search tools, masking a flag-supplied pattern should prevent masking the
                 // first positional argument as a pattern.
+                if is_search_pattern_flag(cmd, flag) {
+                    search_pattern_masked = true;
+                }
+            }
+            continue;
+        }
+
+        // Handle attached short-flag values like `-e"pattern"` or `-m"commit message"`.
+        // This also covers combined clusters where the data-flag appears before the value
+        // (e.g., `git commit -am"msg"`).
+        if let Some((flag, value_range)) =
+            split_short_flag_attached_value(cmd, token_text, token.byte_range.start)
+        {
+            if !token.has_inline_code {
+                mask_ranges.push(value_range);
                 if is_search_pattern_flag(cmd, flag) {
                     search_pattern_masked = true;
                 }
@@ -1158,8 +1171,8 @@ fn is_search_command(cmd: &str) -> bool {
 fn is_search_pattern_flag(cmd: &str, flag: &str) -> bool {
     let base_name = cmd.rsplit('/').next().unwrap_or(cmd);
     match base_name {
-        "rg" => matches!(flag, "-e" | "--regexp" | "--fixed-strings"),
-        "grep" => matches!(flag, "-e" | "--regexp" | "-F" | "--fixed-strings"),
+        "rg" => matches!(flag, "-e" | "--regexp"),
+        "grep" => matches!(flag, "-e" | "--regexp"),
         _ => false,
     }
 }
@@ -1182,6 +1195,50 @@ fn split_flag_assignment(token: &str, token_start: usize) -> Option<(&str, Range
     let value_start = token_start + eq_offset + 1;
     let value_end = token_start + token.len();
     Some((flag, value_start..value_end))
+}
+
+#[must_use]
+fn split_short_flag_attached_value(
+    cmd: &str,
+    token: &str,
+    token_start: usize,
+) -> Option<(&'static str, Range<usize>)> {
+    if !token.starts_with('-') || token.starts_with("--") || token.len() <= 2 || token.contains('=')
+    {
+        return None;
+    }
+
+    let base_name = cmd.rsplit('/').next().unwrap_or(cmd);
+    let bytes = token.as_bytes();
+    let flags = bytes.get(1..)?;
+
+    for (offset, b) in flags.iter().enumerate() {
+        let token_index = 1 + offset;
+        let next_index = token_index + 1;
+        if next_index >= bytes.len() {
+            continue;
+        }
+
+        let Some(short_flag) = SAFE_STRING_REGISTRY
+            .flag_data_pairs
+            .iter()
+            .filter(|entry| entry.command == base_name)
+            .filter_map(|entry| entry.short_flag)
+            .find(|short| short.as_bytes().get(1) == Some(b))
+        else {
+            continue;
+        };
+
+        let value_start = token_start + next_index;
+        let value_end = token_start + token.len();
+        if value_start >= value_end {
+            continue;
+        }
+
+        return Some((short_flag, value_start..value_end));
+    }
+
+    None
 }
 
 #[must_use]
@@ -1915,19 +1972,21 @@ mod tests {
 
     #[test]
     fn test_registry_grep_pattern_flags() {
-        // grep -e and --regexp are data (patterns, not code)
+        // grep -e/--regexp take pattern arguments (data, not code)
         assert!(SAFE_STRING_REGISTRY.is_flag_data("grep", "-e"));
         assert!(SAFE_STRING_REGISTRY.is_flag_data("grep", "--regexp"));
-        assert!(SAFE_STRING_REGISTRY.is_flag_data("grep", "-F"));
-        assert!(SAFE_STRING_REGISTRY.is_flag_data("grep", "--fixed-strings"));
+        // grep -F/--fixed-strings do NOT take pattern arguments (pattern remains positional)
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("grep", "-F"));
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("grep", "--fixed-strings"));
     }
 
     #[test]
     fn test_registry_rg_pattern_flags() {
-        // rg -e, --regexp, --fixed-strings are data
+        // rg -e/--regexp take pattern arguments (data, not code)
         assert!(SAFE_STRING_REGISTRY.is_flag_data("rg", "-e"));
         assert!(SAFE_STRING_REGISTRY.is_flag_data("rg", "--regexp"));
-        assert!(SAFE_STRING_REGISTRY.is_flag_data("rg", "--fixed-strings"));
+        // rg --fixed-strings does NOT take a pattern argument (pattern remains positional)
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("rg", "--fixed-strings"));
     }
 
     #[test]
@@ -1953,8 +2012,8 @@ mod tests {
         let flags = SAFE_STRING_REGISTRY.data_flags_for_command("grep");
         assert!(flags.contains(&"-e"));
         assert!(flags.contains(&"--regexp"));
-        assert!(flags.contains(&"-F"));
-        assert!(flags.contains(&"--fixed-strings"));
+        assert!(!flags.contains(&"-F"));
+        assert!(!flags.contains(&"--fixed-strings"));
     }
 
     #[test]
@@ -2118,6 +2177,56 @@ mod tests {
         assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
         assert!(!sanitized.as_ref().contains("rm -rf"));
         assert!(sanitized.as_ref().contains("rg -n"));
+    }
+
+    #[test]
+    fn sanitize_handles_rg_fixed_strings_flag_with_other_options() {
+        let cmd = r#"rg --fixed-strings -n "rm -rf" src/main.rs"#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("rg --fixed-strings -n"));
+    }
+
+    #[test]
+    fn sanitize_handles_grep_fixed_strings_flag_with_other_options() {
+        let cmd = r#"grep -F -n "rm -rf" src/main.rs"#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("grep -F -n"));
+    }
+
+    #[test]
+    fn sanitize_handles_attached_search_pattern_value_rg() {
+        let cmd = r#"rg -e"rm -rf" src/main.rs"#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("rg -e"));
+    }
+
+    #[test]
+    fn sanitize_handles_attached_search_pattern_value_grep() {
+        let cmd = r#"grep -e"rm -rf" src/main.rs"#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("grep -e"));
+    }
+
+    #[test]
+    fn sanitize_handles_attached_git_commit_message() {
+        let cmd = r#"git commit -m"Fix rm -rf detection""#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("git commit -m"));
     }
 
     #[test]
