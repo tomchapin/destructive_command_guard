@@ -128,14 +128,18 @@ pub fn strip_wrapper_prefixes(command: &str) -> NormalizedCommand<'_> {
 
 /// Strip `sudo` prefix with its options.
 ///
-/// Handles: `-E`, `-H`, `-n`, `-k`, `-K`, `-S`, `-b`, `-u <user>`, `-g <group>`,
-/// `-h <host>`, `-p <prompt>`, and `--` terminator.
+/// Handles: `-E`, `-H`, `-n`, `-k`, `-K`, `-S`, `-s`, `-b`, `-i`, `-P`, `-A`, `-B`,
+/// `-u <user>`, `-g <group>`, `-h <host>`, `-p <prompt>`, `-C <num>`, `-r <role>`,
+/// `-U <user>`, `-D <dir>`, and `--` terminator.
 #[allow(clippy::too_many_lines)]
 fn strip_sudo(command: &str) -> Option<(String, StrippedWrapper)> {
     // Options that take no argument
-    const SIMPLE_FLAGS: &[char] = &['E', 'H', 'n', 'k', 'K', 'S', 'b', 'i', 'P', 'A'];
+    // -s (shell) runs user's shell; if a command follows, it's passed via -c
+    // -B (bell) rings bell on password prompt
+    const SIMPLE_FLAGS: &[char] = &['E', 'H', 'n', 'k', 'K', 'S', 's', 'b', 'i', 'P', 'A', 'B'];
     // Options that take an argument
-    const ARG_FLAGS: &[char] = &['u', 'g', 'h', 'p', 'C', 'r', 'U'];
+    // -D (chdir) changes to directory before running command
+    const ARG_FLAGS: &[char] = &['u', 'g', 'h', 'p', 'C', 'r', 'U', 'D'];
 
     let trimmed = command.trim_start();
     if !trimmed.starts_with("sudo") {
@@ -639,5 +643,41 @@ mod tests {
     fn test_no_wrappers() {
         let result = strip_wrapper_prefixes("git status");
         assert!(!result.was_normalized());
+    }
+
+    #[test]
+    fn test_sudo_with_shell_flag() {
+        // -s runs user's shell; command is passed via -c
+        let result = strip_wrapper_prefixes("sudo -s git reset --hard");
+        assert_eq!(result.normalized, "git reset --hard");
+        assert_eq!(result.stripped_wrappers[0].wrapper_type, "sudo");
+    }
+
+    #[test]
+    fn test_sudo_shell_alone() {
+        // sudo -s alone (no command) should not be stripped
+        let result = strip_wrapper_prefixes("sudo -s");
+        assert!(!result.was_normalized());
+    }
+
+    #[test]
+    fn test_sudo_with_bell_flag() {
+        // -B rings bell on password prompt
+        let result = strip_wrapper_prefixes("sudo -B git reset --hard");
+        assert_eq!(result.normalized, "git reset --hard");
+    }
+
+    #[test]
+    fn test_sudo_with_chdir() {
+        // -D changes directory before running command
+        let result = strip_wrapper_prefixes("sudo -D /tmp git reset --hard");
+        assert_eq!(result.normalized, "git reset --hard");
+    }
+
+    #[test]
+    fn test_sudo_combined_shell_flags() {
+        // Combined flags including -s
+        let result = strip_wrapper_prefixes("sudo -EBs git reset --hard");
+        assert_eq!(result.normalized, "git reset --hard");
     }
 }
