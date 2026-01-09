@@ -3724,4 +3724,126 @@ resource "null_resource" "test" {
         assert_eq!(extracted.len(), 1);
         assert_eq!(extracted[0].command, "rm -rf /actual");
     }
+
+    // =========================================================================
+    // docker-compose extractor tests
+    // =========================================================================
+
+    #[test]
+    fn is_docker_compose_path_detects_correctly() {
+        // Should match
+        assert!(is_docker_compose_path(Path::new("docker-compose.yml")));
+        assert!(is_docker_compose_path(Path::new("docker-compose.yaml")));
+        assert!(is_docker_compose_path(Path::new("compose.yml")));
+        assert!(is_docker_compose_path(Path::new("compose.yaml")));
+        assert!(is_docker_compose_path(Path::new("/foo/bar/docker-compose.yml")));
+        // Case insensitive
+        assert!(is_docker_compose_path(Path::new("Docker-Compose.YML")));
+        assert!(is_docker_compose_path(Path::new("COMPOSE.YAML")));
+
+        // Should NOT match
+        assert!(!is_docker_compose_path(Path::new("docker-compose.json")));
+        assert!(!is_docker_compose_path(Path::new("my-docker-compose.yml")));
+        assert!(!is_docker_compose_path(Path::new("compose.yml.bak")));
+    }
+
+    #[test]
+    fn docker_compose_extracts_inline_command() {
+        let content = r#"
+services:
+  app:
+    image: alpine
+    command: rm -rf /data
+"#;
+        let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &["rm"]);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].command, "rm -rf /data");
+        assert_eq!(extracted[0].extractor_id, "docker_compose.command");
+    }
+
+    #[test]
+    fn docker_compose_extracts_entrypoint() {
+        let content = r#"
+services:
+  app:
+    entrypoint: /bin/sh -c "rm -rf /tmp/*"
+"#;
+        let extracted =
+            extract_docker_compose_from_str("docker-compose.yml", content, &["rm"]);
+        assert_eq!(extracted.len(), 1);
+        assert!(extracted[0].command.contains("rm -rf"));
+    }
+
+    #[test]
+    fn docker_compose_extracts_array_command() {
+        let content = r#"
+services:
+  app:
+    command: ["sh", "-c", "rm -rf /cache"]
+"#;
+        let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &["rm"]);
+        assert_eq!(extracted.len(), 1);
+        assert!(extracted[0].command.contains("rm"));
+    }
+
+    #[test]
+    fn docker_compose_ignores_environment() {
+        let content = r#"
+services:
+  app:
+    environment:
+      CLEANUP: "rm -rf /"
+      DANGER: "kubectl delete"
+    command: echo safe
+"#;
+        let extracted =
+            extract_docker_compose_from_str("docker-compose.yml", content, &["rm", "kubectl"]);
+        // Should NOT extract from environment
+        assert!(extracted.is_empty());
+    }
+
+    #[test]
+    fn docker_compose_ignores_labels() {
+        let content = r#"
+services:
+  app:
+    labels:
+      description: "Uses rm -rf for cleanup"
+    command: echo hello
+"#;
+        let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &["rm"]);
+        assert!(extracted.is_empty());
+    }
+
+    #[test]
+    fn docker_compose_extracts_healthcheck_test() {
+        let content = r#"
+services:
+  db:
+    healthcheck:
+      test: rm -rf /health/check
+      interval: 30s
+"#;
+        let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &["rm"]);
+        assert_eq!(extracted.len(), 1);
+        assert!(extracted[0].command.contains("rm -rf"));
+    }
+
+    #[test]
+    fn docker_compose_handles_empty_file() {
+        let content = "";
+        let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &["rm"]);
+        assert!(extracted.is_empty());
+    }
+
+    #[test]
+    fn docker_compose_handles_no_services() {
+        let content = r#"
+version: "3"
+networks:
+  default:
+"#;
+        let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &["rm"]);
+        assert!(extracted.is_empty());
+    }
 }
