@@ -45,6 +45,7 @@
 use regex::RegexSet;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
+use tracing::{debug, instrument, trace, warn};
 
 /// Tier 1 trigger patterns for heredoc and inline script detection.
 ///
@@ -120,10 +121,13 @@ pub enum TriggerResult {
 /// ```
 #[inline]
 #[must_use]
+#[instrument(skip(command), fields(cmd_len = command.len()))]
 pub fn check_triggers(command: &str) -> TriggerResult {
     if HEREDOC_TRIGGERS.is_match(command) {
+        debug!("tier1_trigger: heredoc/inline script indicator detected");
         TriggerResult::Triggered
     } else {
+        trace!("tier1_no_trigger: fast path allow");
         TriggerResult::NoTrigger
     }
 }
@@ -171,6 +175,7 @@ impl Default for ExtractionLimits {
 pub enum ScriptLanguage {
     Bash,
     Go,
+    Php,
     Python,
     Ruby,
     Perl,
@@ -756,6 +761,7 @@ fn record_timeout_if_needed(
 /// }
 /// ```
 #[must_use]
+#[instrument(skip(command, limits), fields(cmd_len = command.len(), timeout_ms = limits.timeout_ms))]
 pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionResult {
     let start_time = Instant::now();
     let timeout = Duration::from_millis(limits.timeout_ms);
@@ -763,6 +769,11 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
 
     // Enforce input size limit
     if command.len() > limits.max_body_bytes {
+        warn!(
+            actual = command.len(),
+            limit = limits.max_body_bytes,
+            "tier2_skip: input exceeds size limit"
+        );
         skip_reasons.push(SkipReason::ExceededSizeLimit {
             actual: command.len(),
             limit: limits.max_body_bytes,
@@ -772,6 +783,7 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
 
     // Check for binary content (null bytes or high non-printable ratio)
     if let Some(reason) = check_binary_content(command) {
+        warn!(?reason, "tier2_skip: binary content detected");
         skip_reasons.push(reason);
         return ExtractionResult::Skipped(skip_reasons);
     }
@@ -828,13 +840,28 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
     );
 
     // Return based on what we found
+    let elapsed_us = start_time.elapsed().as_micros();
     match (extracted.is_empty(), skip_reasons.is_empty()) {
-        (true, true) => ExtractionResult::NoContent,
-        (true, false) => ExtractionResult::Skipped(skip_reasons),
-        (false, true) => ExtractionResult::Extracted(extracted),
+        (true, true) => {
+            trace!(elapsed_us, "tier2_complete: no content found");
+            ExtractionResult::NoContent
+        }
+        (true, false) => {
+            warn!(elapsed_us, skip_count = skip_reasons.len(), "tier2_complete: skipped");
+            ExtractionResult::Skipped(skip_reasons)
+        }
+        (false, true) => {
+            debug!(elapsed_us, count = extracted.len(), "tier2_complete: content extracted");
+            ExtractionResult::Extracted(extracted)
+        }
         (false, false) => {
             // Partial extraction with some skips - return what we got
-            // The skips are logged but don't prevent returning extracted content
+            debug!(
+                elapsed_us,
+                count = extracted.len(),
+                skip_count = skip_reasons.len(),
+                "tier2_complete: partial extraction with skips"
+            );
             ExtractionResult::Extracted(extracted)
         }
     }
@@ -1230,11 +1257,14 @@ pub struct ExtractedShellCommand {
 /// assert_eq!(commands.len(), 0);
 /// ```
 #[must_use]
+#[instrument(skip(content), fields(content_len = content.len()))]
 pub fn extract_shell_commands(content: &str) -> Vec<ExtractedShellCommand> {
     if content.trim().is_empty() {
+        trace!("extract_shell_commands: empty content");
         return Vec::new();
     }
 
+    let start = Instant::now();
     let ast = AstGrep::new(content, SupportLang::Bash);
     let root = ast.root();
 
@@ -1244,6 +1274,11 @@ pub fn extract_shell_commands(content: &str) -> Vec<ExtractedShellCommand> {
     // tree-sitter-bash uses "command" nodes for simple commands
     collect_commands_recursive(root, content, &mut commands);
 
+    debug!(
+        elapsed_us = start.elapsed().as_micros(),
+        count = commands.len(),
+        "extract_shell_commands: AST analysis complete"
+    );
     commands
 }
 
