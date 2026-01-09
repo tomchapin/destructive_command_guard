@@ -842,6 +842,231 @@ pub fn run_simulation_from_reader<R: std::io::Read>(
 }
 
 // =============================================================================
+// Output Formatting (git_safety_guard-1gt.8.3)
+// =============================================================================
+
+use crate::scan::ScanRedactMode;
+
+/// Configuration for output formatting.
+#[derive(Debug, Clone)]
+pub struct SimulateOutputConfig {
+    /// Redaction mode for sensitive data.
+    pub redact: ScanRedactMode,
+    /// Maximum command length in output (0 = unlimited).
+    pub truncate: usize,
+    /// Limit to top N rules (0 = show all).
+    pub top: usize,
+    /// Show verbose output with exemplars.
+    pub verbose: bool,
+}
+
+impl Default for SimulateOutputConfig {
+    fn default() -> Self {
+        Self {
+            redact: ScanRedactMode::None,
+            truncate: 120,
+            top: 20,
+            verbose: false,
+        }
+    }
+}
+
+/// JSON output structure for simulate command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateJsonOutput {
+    pub schema_version: u32,
+    pub totals: SimulateJsonTotals,
+    pub rules: Vec<SimulateJsonRule>,
+    pub errors: SimulateJsonErrors,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateJsonTotals {
+    pub commands: usize,
+    pub allowed: usize,
+    pub warned: usize,
+    pub denied: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateJsonRule {
+    pub rule_id: String,
+    pub count: usize,
+    pub decision: String,
+    pub exemplars: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateJsonErrors {
+    pub malformed_count: usize,
+    pub ignored_count: usize,
+    pub stopped_at_limit: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_hit: Option<String>,
+}
+
+/// Apply redaction and truncation to a command string.
+pub fn redact_and_truncate_command(cmd: &str, config: &SimulateOutputConfig) -> String {
+    let redacted = match config.redact {
+        ScanRedactMode::None => cmd.to_string(),
+        ScanRedactMode::Quoted => crate::scan::redact_quoted_strings(cmd),
+        ScanRedactMode::Aggressive => crate::scan::redact_aggressively(cmd),
+    };
+
+    if config.truncate > 0 && redacted.len() > config.truncate {
+        let target = config.truncate.saturating_sub(3);
+        let mut end = target;
+        while end > 0 && !redacted.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &redacted[..end])
+    } else {
+        redacted
+    }
+}
+
+/// Format simulation result as pretty-printed text.
+pub fn format_pretty_output(result: &SimulationResult, config: &SimulateOutputConfig) -> String {
+    let mut output = String::new();
+    output.push_str("Simulation Results\n==================\n\n");
+    output.push_str("Summary:\n");
+    output.push_str(&format!(
+        "  Total commands:  {}\n",
+        result.summary.total_commands
+    ));
+    output.push_str(&format!(
+        "  Allowed:         {}\n",
+        result.summary.allow_count
+    ));
+    output.push_str(&format!(
+        "  Warned:          {}\n",
+        result.summary.warn_count
+    ));
+    output.push_str(&format!(
+        "  Denied:          {}\n",
+        result.summary.deny_count
+    ));
+    output.push('\n');
+
+    if !result.rules.is_empty() {
+        output.push_str("Rules Triggered (sorted by count):\n");
+        let rules_to_show: Vec<_> = if config.top > 0 {
+            result.rules.iter().take(config.top).collect()
+        } else {
+            result.rules.iter().collect()
+        };
+        for rule in rules_to_show {
+            let decision_str = match rule.decision {
+                SimulateDecision::Allow => "allow",
+                SimulateDecision::Warn => "warn",
+                SimulateDecision::Deny => "DENY",
+            };
+            output.push_str(&format!(
+                "  {:>5} x {} [{}]\n",
+                rule.count, rule.rule_id, decision_str
+            ));
+            if config.verbose {
+                for ex in &rule.exemplars {
+                    let display_cmd = redact_and_truncate_command(&ex.command, config);
+                    output.push_str(&format!("         L{}: {}\n", ex.line_number, display_cmd));
+                }
+            }
+        }
+        if config.top > 0 && result.rules.len() > config.top {
+            output.push_str(&format!(
+                "  ... and {} more rules\n",
+                result.rules.len() - config.top
+            ));
+        }
+        output.push('\n');
+    }
+
+    if !result.packs.is_empty() {
+        output.push_str("Packs Summary:\n");
+        for pack in &result.packs {
+            output.push_str(&format!("  {:>5} x {}\n", pack.count, pack.pack_id));
+        }
+        output.push('\n');
+    }
+
+    output.push_str("Parse Statistics:\n");
+    output.push_str(&format!(
+        "  Lines read:         {}\n",
+        result.parse_stats.lines_read
+    ));
+    output.push_str(&format!(
+        "  Commands extracted: {}\n",
+        result.parse_stats.commands_extracted
+    ));
+    output.push_str(&format!(
+        "  Malformed lines:    {}\n",
+        result.parse_stats.malformed_count
+    ));
+    output.push_str(&format!(
+        "  Ignored lines:      {}\n",
+        result.parse_stats.ignored_count
+    ));
+    if result.parse_stats.stopped_at_limit {
+        if let Some(ref limit) = result.parse_stats.limit_hit {
+            output.push_str(&format!("  Stopped at limit:   {:?}\n", limit));
+        }
+    }
+    output
+}
+
+/// Format simulation result as JSON.
+pub fn format_json_output(
+    result: SimulationResult,
+    config: &SimulateOutputConfig,
+) -> Result<String, serde_json::Error> {
+    let rules_to_show: Vec<_> = if config.top > 0 {
+        result.rules.into_iter().take(config.top).collect()
+    } else {
+        result.rules
+    };
+
+    let json_rules: Vec<SimulateJsonRule> = rules_to_show
+        .into_iter()
+        .map(|r| {
+            let exemplars: Vec<String> = r
+                .exemplars
+                .iter()
+                .map(|ex| redact_and_truncate_command(&ex.command, config))
+                .collect();
+            SimulateJsonRule {
+                rule_id: r.rule_id,
+                count: r.count,
+                decision: match r.decision {
+                    SimulateDecision::Allow => "allow".to_string(),
+                    SimulateDecision::Warn => "warn".to_string(),
+                    SimulateDecision::Deny => "deny".to_string(),
+                },
+                exemplars,
+            }
+        })
+        .collect();
+
+    let output = SimulateJsonOutput {
+        schema_version: result.schema_version,
+        totals: SimulateJsonTotals {
+            commands: result.summary.total_commands,
+            allowed: result.summary.allow_count,
+            warned: result.summary.warn_count,
+            denied: result.summary.deny_count,
+        },
+        rules: json_rules,
+        errors: SimulateJsonErrors {
+            malformed_count: result.parse_stats.malformed_count,
+            ignored_count: result.parse_stats.ignored_count,
+            stopped_at_limit: result.parse_stats.stopped_at_limit,
+            limit_hit: result.parse_stats.limit_hit.map(|l| format!("{:?}", l)),
+        },
+    };
+
+    serde_json::to_string_pretty(&output)
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 

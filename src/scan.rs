@@ -466,7 +466,7 @@ fn truncate_utf8(s: &str, max_chars: usize) -> String {
     format!("{truncated}…")
 }
 
-pub(crate) fn redact_quoted_strings(s: &str) -> String {
+pub fn redact_quoted_strings(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars();
 
@@ -508,7 +508,7 @@ pub(crate) fn redact_quoted_strings(s: &str) -> String {
     out
 }
 
-pub(crate) fn redact_aggressively(s: &str) -> String {
+pub fn redact_aggressively(s: &str) -> String {
     // First pass: redact quoted strings (most likely secret-bearing spans).
     let s = redact_quoted_strings(s);
 

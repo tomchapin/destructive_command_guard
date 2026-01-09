@@ -340,6 +340,18 @@ pub struct SimulateCommand {
     /// Show verbose output (per-line format detection, etc.)
     #[arg(long, short = 'v')]
     pub verbose: bool,
+
+    /// Redact sensitive data in exemplar commands
+    #[arg(long, value_enum, default_value = "none")]
+    pub redact: crate::scan::ScanRedactMode,
+
+    /// Maximum length for exemplar commands in output (0 = unlimited)
+    #[arg(long, default_value = "120")]
+    pub truncate: usize,
+
+    /// Limit output to top N rules by count (0 = show all)
+    #[arg(long, default_value = "20")]
+    pub top: usize,
 }
 
 /// Output format for simulate command.
@@ -532,8 +544,8 @@ pub fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load();
 
     match cli.command {
-        Some(Command::Doctor { fix }) => {
-            doctor(fix);
+        Some(Command::Doctor { fix, format }) => {
+            doctor(fix, format);
         }
         Some(Command::Install { force }) => {
             install_hook(force)?;
@@ -1198,7 +1210,10 @@ fn handle_simulate_command(
     sim: SimulateCommand,
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::simulate::{SimulateLimits, SimulationConfig, run_simulation_from_reader};
+    use crate::simulate::{
+        SimulateLimits, SimulateOutputConfig, SimulationConfig, format_json_output,
+        format_pretty_output, run_simulation_from_reader,
+    };
     use std::fs::File;
     use std::io::{self, BufReader};
 
@@ -1210,6 +1225,9 @@ fn handle_simulate_command(
         strict,
         format,
         verbose,
+        redact,
+        truncate,
+        top,
     } = sim;
 
     let limits = SimulateLimits {
@@ -1230,75 +1248,28 @@ fn handle_simulate_command(
     // Run simulation with evaluation loop
     let result = run_simulation_from_reader(reader, limits, config, sim_config, strict)?;
 
-    // Output results
+    // Build output configuration
+    let output_config = SimulateOutputConfig {
+        redact,
+        truncate,
+        top,
+        verbose,
+    };
+
+    // Output results using formatting functions
     match format {
         SimulateFormat::Pretty => {
-            println!("Simulation Results");
-            println!("==================");
-            println!();
-            println!("Summary:");
-            println!("  Total commands:  {}", result.summary.total_commands);
-            println!("  Allowed:         {}", result.summary.allow_count);
-            println!("  Warned:          {}", result.summary.warn_count);
-            println!("  Denied:          {}", result.summary.deny_count);
-            println!();
-
-            if !result.rules.is_empty() {
-                println!("Rules Triggered (sorted by count):");
-                for rule in &result.rules {
-                    let decision_str = match rule.decision {
-                        crate::simulate::SimulateDecision::Allow => "allow",
-                        crate::simulate::SimulateDecision::Warn => "warn",
-                        crate::simulate::SimulateDecision::Deny => "DENY",
-                    };
-                    println!("  {:>5} x {} [{}]", rule.count, rule.rule_id, decision_str);
-                    if verbose {
-                        for ex in &rule.exemplars {
-                            println!(
-                                "         L{}: {}",
-                                ex.line_number,
-                                truncate_command_for_display(&ex.command, 60)
-                            );
-                        }
-                    }
-                }
-                println!();
-            }
-
-            if !result.packs.is_empty() {
-                println!("Packs Summary:");
-                for pack in &result.packs {
-                    println!("  {:>5} x {}", pack.count, pack.pack_id);
-                }
-                println!();
-            }
-
-            println!("Parse Statistics:");
-            println!("  Lines read:         {}", result.parse_stats.lines_read);
-            println!(
-                "  Commands extracted: {}",
-                result.parse_stats.commands_extracted
-            );
-            println!(
-                "  Malformed lines:    {}",
-                result.parse_stats.malformed_count
-            );
-            println!("  Ignored lines:      {}", result.parse_stats.ignored_count);
-            if result.parse_stats.stopped_at_limit {
-                if let Some(ref limit) = result.parse_stats.limit_hit {
-                    println!("  Stopped at limit:   {limit:?}");
-                }
-            }
+            print!("{}", format_pretty_output(&result, &output_config));
         }
         SimulateFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            println!("{}", format_json_output(result, &output_config)?);
         }
     }
 
     Ok(())
 }
 
-/// Truncate a command string for display, adding ellipsis if needed.
+/// Truncate a command/// Truncate a command string for display, adding ellipsis if needed.
 ///
 /// This function handles UTF-8 strings safely by not splitting multi-byte characters.
 fn truncate_command_for_display(s: &str, max_len: usize) -> String {
@@ -2105,8 +2076,11 @@ fn handle_explain(
 
 /// Check installation, configuration, and hook registration
 #[allow(clippy::too_many_lines, clippy::unnecessary_unwrap)]
-fn doctor(fix: bool) {
+fn doctor(fix: bool, format: DoctorFormat) {
     use colored::Colorize;
+
+    // For now, ignore format parameter - only pretty output supported
+    let _ = format;
 
     println!("{}", "dcg doctor".green().bold());
     println!();
