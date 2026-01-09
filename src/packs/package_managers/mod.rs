@@ -18,7 +18,7 @@ pub fn create_pack() -> Pack {
         description: "Protects against dangerous package manager operations like publishing \
                       packages and removing critical system packages",
         keywords: &[
-            "npm", "yarn", "pnpm", "pip", "apt", "yum", "dnf", "cargo", "gem", "publish",
+            "npm", "yarn", "pnpm", "pip", "apt", "yum", "dnf", "cargo", "gem", "brew", "publish",
         ],
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
@@ -126,4 +126,29 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
             "brew uninstall removes packages. Verify no dependent packages are affected."
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brew_uninstall_is_reachable_via_keywords() {
+        let pack = create_pack();
+        assert!(
+            pack.might_match("brew uninstall wget"),
+            "brew should be included in pack keywords to prevent false negatives"
+        );
+        let matched = pack
+            .check("brew uninstall wget")
+            .expect("brew uninstall should be blocked by package managers pack");
+        assert_eq!(matched.name, Some("brew-uninstall"));
+    }
+
+    #[test]
+    fn keyword_absent_skips_pack() {
+        let pack = create_pack();
+        assert!(!pack.might_match("echo hello"));
+        assert!(pack.check("echo hello").is_none());
+    }
 }

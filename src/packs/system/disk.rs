@@ -17,7 +17,7 @@ pub fn create_pack() -> Pack {
         name: "Disk Operations",
         description: "Protects against destructive disk operations like dd to devices, \
                       mkfs, and partition table modifications",
-        keywords: &["dd", "fdisk", "mkfs", "parted", "mount", "/dev/"],
+        keywords: &["dd", "fdisk", "mkfs", "parted", "mount", "wipefs", "/dev/"],
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
     }
@@ -99,4 +99,29 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
             "losetup modifies loop device associations. Verify before proceeding."
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wipefs_is_reachable_via_keywords() {
+        let pack = create_pack();
+        assert!(
+            pack.might_match("wipefs --all somefile.img"),
+            "wipefs should be included in pack keywords to prevent false negatives"
+        );
+        let matched = pack
+            .check("wipefs --all somefile.img")
+            .expect("wipefs should be blocked by disk pack");
+        assert_eq!(matched.name, Some("wipefs"));
+    }
+
+    #[test]
+    fn keyword_absent_skips_pack() {
+        let pack = create_pack();
+        assert!(!pack.might_match("echo hello"));
+        assert!(pack.check("echo hello").is_none());
+    }
 }

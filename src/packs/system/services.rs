@@ -16,7 +16,14 @@ pub fn create_pack() -> Pack {
         name: "Services",
         description: "Protects against dangerous service operations like stopping critical \
                       services and modifying init configuration",
-        keywords: &["systemctl", "service", "init", "upstart"],
+        keywords: &[
+            "systemctl",
+            "service",
+            "init",
+            "upstart",
+            "shutdown",
+            "reboot",
+        ],
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
     }
@@ -92,4 +99,42 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
             "init 0 shuts down, init 6 reboots the system."
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_is_reachable_via_keywords() {
+        let pack = create_pack();
+        assert!(
+            pack.might_match("shutdown -h now"),
+            "shutdown should be included in pack keywords to prevent false negatives"
+        );
+        let matched = pack
+            .check("shutdown -h now")
+            .expect("shutdown should be blocked by services pack");
+        assert_eq!(matched.name, Some("shutdown"));
+    }
+
+    #[test]
+    fn reboot_is_reachable_via_keywords() {
+        let pack = create_pack();
+        assert!(
+            pack.might_match("reboot"),
+            "reboot should be included in pack keywords to prevent false negatives"
+        );
+        let matched = pack
+            .check("reboot")
+            .expect("reboot should be blocked by services pack");
+        assert_eq!(matched.name, Some("reboot"));
+    }
+
+    #[test]
+    fn keyword_absent_skips_pack() {
+        let pack = create_pack();
+        assert!(!pack.might_match("echo hello"));
+        assert!(pack.check("echo hello").is_none());
+    }
 }
