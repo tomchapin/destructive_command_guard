@@ -9,8 +9,12 @@
 
 use libfuzzer_sys::fuzz_target;
 
+use destructive_command_guard::LayeredAllowlist;
 use destructive_command_guard::config::Config;
 use destructive_command_guard::evaluator::evaluate_command;
+use std::sync::LazyLock;
+
+static EMPTY_ALLOWLISTS: LazyLock<LayeredAllowlist> = LazyLock::new(LayeredAllowlist::default);
 
 fuzz_target!(|data: &[u8]| {
     // Try to interpret the bytes as UTF-8
@@ -23,14 +27,30 @@ fuzz_target!(|data: &[u8]| {
         // Use default config for consistent behavior
         let config = Config::default();
         let compiled_overrides = config.overrides.compile();
+        let allowlists = &EMPTY_ALLOWLISTS;
 
         // Test with various keyword combinations
-        let all_keywords = &["git", "rm", "docker", "kubectl", "psql", "mysql", "mongosh", "redis-cli"];
+        let all_keywords = &[
+            "git",
+            "rm",
+            "docker",
+            "kubectl",
+            "psql",
+            "mysql",
+            "mongosh",
+            "redis-cli",
+        ];
 
         // Evaluate - this should never panic
-        let _ = evaluate_command(command, &config, all_keywords, &compiled_overrides);
+        let _ = evaluate_command(
+            command,
+            &config,
+            all_keywords,
+            &compiled_overrides,
+            allowlists,
+        );
 
         // Also test with empty keywords (triggers different code paths)
-        let _ = evaluate_command(command, &config, &[], &compiled_overrides);
+        let _ = evaluate_command(command, &config, &[], &compiled_overrides, allowlists);
     }
 });

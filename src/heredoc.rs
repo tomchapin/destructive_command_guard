@@ -1343,6 +1343,7 @@ fn collect_commands_recursive<D: ast_grep_core::Doc>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     // ========================================================================
     // Tier 1: Trigger Detection Tests
@@ -2699,6 +2700,42 @@ fi"#;
             // Extract the text using the range
             let extracted = &script[commands[0].start..commands[0].end];
             assert_eq!(extracted, "echo hello");
+        }
+    }
+
+    proptest! {
+        /// Tier 1 trigger detection must be a superset of Tier 2 extraction.
+        /// If Tier 2 extracts any content, Tier 1 must have triggered.
+        #[test]
+        fn tier1_is_superset_of_tier2_extraction(cmd in prop_oneof![
+            // Random UTF-8
+            "\\PC{0,2000}",
+            // Heredoc-ish inputs (multi-line)
+            "\\PC{0,400}".prop_map(|body| format!("cat <<EOF\n{body}\nEOF")),
+            "\\PC{0,400}".prop_map(|body| format!("cat <<'EOF'\n{body}\nEOF")),
+            // Inline interpreters
+            "\\PC{0,400}".prop_map(|body| format!("python -c \"{}\"", body.replace('\"', ""))),
+            "\\PC{0,400}".prop_map(|body| format!("bash -c \"{}\"", body.replace('\"', ""))),
+            "\\PC{0,400}".prop_map(|body| format!("node -e \"{}\"", body.replace('\"', ""))),
+        ]) {
+            let limits = ExtractionLimits {
+                max_body_bytes: 10_000,
+                max_body_lines: 1_000,
+                max_heredocs: 5,
+                timeout_ms: 50,
+            };
+
+            let extracted = extract_content(&cmd, &limits);
+            if let ExtractionResult::Extracted(contents) = extracted {
+                if !contents.is_empty() {
+                    prop_assert_eq!(
+                        check_triggers(&cmd),
+                        TriggerResult::Triggered,
+                        "Tier 2 extracted but Tier 1 did not trigger for: {:?}",
+                        cmd
+                    );
+                }
+            }
         }
     }
 }

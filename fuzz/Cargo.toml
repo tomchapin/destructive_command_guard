@@ -46,3 +46,35 @@ path = "fuzz_targets/fuzz_normalize.rs"
 test = false
 doc = false
 bench = false
+
+# Fuzz target: heredoc Tier 1 trigger detection (RegexSet)
+[[bin]]
+name = "fuzz_heredoc_trigger"
+path = "fuzz_targets/fuzz_heredoc_trigger.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz target: heredoc Tier 2 extraction (bounded parsing)
+[[bin]]
+name = "fuzz_heredoc_extract"
+path = "fuzz_targets/fuzz_heredoc_extract.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz target: heredoc language detection heuristics
+[[bin]]
+name = "fuzz_heredoc_language"
+path = "fuzz_targets/fuzz_heredoc_language.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz target: bash AST command extraction (tree-sitter via ast-grep)
+[[bin]]
+name = "fuzz_shell_extract"
+path = "fuzz_targets/fuzz_shell_extract.rs"
+test = false
+doc = false
+bench = false
