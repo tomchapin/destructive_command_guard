@@ -57,6 +57,17 @@ Based on test distribution and code review:
 | Critical modules (evaluator, hook) | 80% | 90% |
 | Non-critical (trace, scan) | 50% | 70% |
 
+### CI Coverage Thresholds (Enforced)
+
+As of 2026-01-09, CI enforces the initial targets:
+
+- Overall line coverage: **>= 70%**
+- `src/evaluator.rs` line coverage: **>= 80%**
+- `src/hook.rs` line coverage: **>= 80%**
+
+Threshold enforcement lives in `.github/workflows/ci.yml` under the
+"Check coverage thresholds (enforced)" step.
+
 ## Mock/Fake Inventory
 
 ### 1. MockSafePattern / MockDestructivePattern (evaluator.rs)

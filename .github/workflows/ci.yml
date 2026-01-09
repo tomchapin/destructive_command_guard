@@ -118,16 +118,63 @@ jobs:
             coverage-summary.txt
           retention-days: 30
 
-      - name: Check coverage threshold (informational)
+      - name: Check coverage thresholds (enforced)
         run: |
-          # Extract total coverage percentage (informational, not blocking)
-          COVERAGE=$(grep -oP 'TOTAL.*?(\d+\.\d+)%' coverage-summary.txt | grep -oP '\d+\.\d+' | tail -1 || echo "0")
-          echo "Total coverage: ${COVERAGE}%"
-          echo "coverage=${COVERAGE}" >> $GITHUB_OUTPUT
-          # Log warning if below 50% (informational only)
-          if [ "$(echo "$COVERAGE < 50" | bc -l)" -eq 1 ]; then
-            echo "::warning::Coverage is below 50% (${COVERAGE}%)"
+          set -euo pipefail
+
+          OVERALL_MIN="70.0"
+          EVALUATOR_MIN="80.0"
+          HOOK_MIN="80.0"
+
+          overall=$(grep 'TOTAL' coverage-summary.txt | grep -Eo '[0-9]+\.[0-9]+%' | tail -1 | tr -d '%' || echo "")
+          evaluator=$(awk '$1 ~ /src\/evaluator\.rs$/ {print $2}' coverage-summary.txt | tr -d '%' | tail -1 || true)
+          hook=$(awk '$1 ~ /src\/hook\.rs$/ {print $2}' coverage-summary.txt | tr -d '%' | tail -1 || true)
+
+          echo "Coverage thresholds:"
+          echo "  overall >= ${OVERALL_MIN}%"
+          echo "  src/evaluator.rs >= ${EVALUATOR_MIN}%"
+          echo "  src/hook.rs >= ${HOOK_MIN}%"
+          echo ""
+          echo "Observed coverage:"
+          echo "  overall=${overall}%"
+          echo "  src/evaluator.rs=${evaluator}%"
+          echo "  src/hook.rs=${hook}%"
+
+          echo "coverage_overall=${overall}" >> "$GITHUB_OUTPUT"
+          echo "coverage_evaluator=${evaluator}" >> "$GITHUB_OUTPUT"
+          echo "coverage_hook=${hook}" >> "$GITHUB_OUTPUT"
+
+          failures=0
+          if [ -z "$overall" ]; then
+            echo "::error::Failed to parse TOTAL coverage from coverage-summary.txt"
+            failures=$((failures + 1))
+          elif [ "$(echo "$overall < $OVERALL_MIN" | bc -l)" -eq 1 ]; then
+            echo "::error::Overall coverage ${overall}% is below ${OVERALL_MIN}%"
+            failures=$((failures + 1))
           fi
+
+          if [ -z "$evaluator" ]; then
+            echo "::error::Failed to parse src/evaluator.rs coverage from coverage-summary.txt"
+            failures=$((failures + 1))
+          elif [ "$(echo "$evaluator < $EVALUATOR_MIN" | bc -l)" -eq 1 ]; then
+            echo "::error::src/evaluator.rs coverage ${evaluator}% is below ${EVALUATOR_MIN}%"
+            failures=$((failures + 1))
+          fi
+
+          if [ -z "$hook" ]; then
+            echo "::error::Failed to parse src/hook.rs coverage from coverage-summary.txt"
+            failures=$((failures + 1))
+          elif [ "$(echo "$hook < $HOOK_MIN" | bc -l)" -eq 1 ]; then
+            echo "::error::src/hook.rs coverage ${hook}% is below ${HOOK_MIN}%"
+            failures=$((failures + 1))
+          fi
+
+          if [ "$failures" -gt 0 ]; then
+            echo "::error::Coverage thresholds not met (${failures} failure(s))"
+            exit 1
+          fi
+
+          echo "Coverage thresholds satisfied."
 
   # Performance benchmark enforcement (push to master only)
   # Runs benchmarks and checks against performance budgets defined in src/perf.rs
