@@ -499,6 +499,7 @@ impl PackRegistry {
     /// This is used by `check_command` to ensure consistent attribution when
     /// multiple packs could match the same command. The ordering is:
     ///
+    /// 0. **Tier 0 (safe)**: `safe.*` packs - safe patterns checked first to whitelist
     /// 1. **Tier 1 (core)**: `core.*` packs - most fundamental protections
     /// 2. **Tier 2 (system)**: `system.*` - disk, permissions, services
     /// 3. **Tier 3 (infrastructure)**: `infrastructure.*` - terraform, ansible, pulumi
@@ -1423,8 +1424,7 @@ mod tests {
         // Verify "rm" is in the keywords (from core.filesystem)
         assert!(
             keywords.contains(&"rm"),
-            "Keywords should include 'rm' from core.filesystem. Got: {:?}",
-            keywords
+            "Keywords should include 'rm' from core.filesystem. Got: {keywords:?}"
         );
 
         // All rm commands should NOT be quick-rejected

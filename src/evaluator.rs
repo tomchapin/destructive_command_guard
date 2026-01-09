@@ -2368,10 +2368,8 @@ mod tests {
         let enabled_keywords: Vec<&str> = vec!["rm"];
 
         // Test with both packs enabled - safe.cleanup should allow
-        let packs_with_cleanup: Vec<String> = vec![
-            "core.filesystem".to_string(),
-            "safe.cleanup".to_string(),
-        ];
+        let packs_with_cleanup: Vec<String> =
+            vec!["core.filesystem".to_string(), "safe.cleanup".to_string()];
 
         let result = evaluate_command_with_pack_order(
             "rm -rf target/",
@@ -2412,10 +2410,7 @@ mod tests {
         let allowlists = default_allowlists();
         let heredoc_settings = crate::config::HeredocSettings::default();
         let enabled_keywords: Vec<&str> = vec!["rm"];
-        let packs: Vec<String> = vec![
-            "core.filesystem".to_string(),
-            "safe.cleanup".to_string(),
-        ];
+        let packs: Vec<String> = vec!["core.filesystem".to_string(), "safe.cleanup".to_string()];
 
         // Path traversal should still be blocked
         let result = evaluate_command_with_pack_order(
@@ -2438,12 +2433,9 @@ mod tests {
     fn evaluator_safe_cleanup_blocks_non_allowlisted() {
         let compiled_overrides = default_compiled_overrides();
         let allowlists = default_allowlists();
-        let heredoc_settings = test_heredoc_settings();
+        let heredoc_settings = crate::config::HeredocSettings::default();
         let enabled_keywords: Vec<&str> = vec!["rm"];
-        let packs: Vec<String> = vec![
-            "core.filesystem".to_string(),
-            "safe.cleanup".to_string(),
-        ];
+        let packs: Vec<String> = vec!["core.filesystem".to_string(), "safe.cleanup".to_string()];
 
         // src/ is not in the cleanup allowlist
         let result = evaluate_command_with_pack_order(
