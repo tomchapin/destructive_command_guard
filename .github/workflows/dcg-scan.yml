@@ -90,12 +90,12 @@ jobs:
           DIFF_RANGE="${{ steps.base.outputs.sha }}...${{ github.event.pull_request.head.sha }}"
           echo "Scanning diff range: $DIFF_RANGE"
 
-          # Run the scan
+          # Run the scan (stdout=JSON, stderr=debug messages)
           dcg scan \
             --git-diff "$DIFF_RANGE" \
             --format json \
             --fail-on "$DCG_FAIL_ON" \
-            > scan-results.json 2>&1
+            > scan-results.json
 
           SCAN_EXIT=$?
           echo "exit_code=$SCAN_EXIT" >> $GITHUB_OUTPUT
@@ -105,9 +105,9 @@ jobs:
 
           # Parse summary for step summary
           if [ -f scan-results.json ] && jq -e '.summary' scan-results.json > /dev/null 2>&1; then
-            TOTAL=$(jq '.summary.total_findings // 0' scan-results.json)
-            ERRORS=$(jq '.summary.by_severity.error // 0' scan-results.json)
-            WARNINGS=$(jq '.summary.by_severity.warning // 0' scan-results.json)
+            TOTAL=$(jq '.summary.findings_total // 0' scan-results.json)
+            ERRORS=$(jq '.summary.severities.error // 0' scan-results.json)
+            WARNINGS=$(jq '.summary.severities.warning // 0' scan-results.json)
 
             echo "## DCG Scan Results" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY

@@ -3985,12 +3985,20 @@ exclude = ["target/**"]
 
     #[test]
     fn truncate_for_markdown_unicode_boundary() {
-        // Test with multi-byte UTF-8 characters
-        // "café" = 5 bytes (c=1, a=1, f=1, é=2)
-        let result = truncate_for_markdown("café", 4);
-        // Should truncate at char boundary, not mid-character
-        assert!(result.is_ascii() || result.chars().all(|c| c.len_utf8() <= 4));
-        assert!(result.ends_with("...") || result == "caf...");
+        // "café" = 5 bytes: c(1) + a(1) + f(1) + é(2)
+        // Truncating at byte 4 lands mid-character (é spans bytes 3-4)
+        // Should back up to byte 3 (char boundary after 'f')
+        assert_eq!(truncate_for_markdown("café", 4), "caf...");
+
+        // Truncating at byte 3 lands at char boundary
+        assert_eq!(truncate_for_markdown("café", 3), "caf...");
+
+        // Truncating at byte 5 keeps entire string (no truncation needed)
+        assert_eq!(truncate_for_markdown("café", 5), "café");
+
+        // Emoji test: "hi👋" = 6 bytes: h(1) + i(1) + 👋(4)
+        // Truncating at byte 3 lands mid-emoji, should back up to byte 2
+        assert_eq!(truncate_for_markdown("hi👋", 3), "hi...");
     }
 
     #[test]
