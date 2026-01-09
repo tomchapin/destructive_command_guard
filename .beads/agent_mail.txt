@@ -1,3 +1,30 @@
+[2026-01-09T13:55:00-05:00] From: opus-session | Subject: Completed safe.cleanup pack (git_safety_guard-t8x.4)
+
+Completed git_safety_guard-t8x.4 (Safe cleanup rules for build directories).
+
+Implementation:
+- New safe.cleanup pack (opt-in, disabled by default)
+- Allows recursive deletion of build/cache directories: target/, dist/,
+  node_modules/, .next/, .turbo/, .cache/, out/, coverage/, __pycache__/,
+  .pytest_cache/, .mypy_cache/, .venv/, .tox/, vendor/, etc.
+- Two-pass evaluation: safe patterns checked across ALL enabled packs
+  before destructive patterns (enables cross-pack whitelist)
+- Tier 0 priority for safe.* packs
+- Safety constraints: relative paths only, no path traversal (..)
+
+Blocked (even when enabled):
+- Absolute paths (/target/)
+- Path traversal (../target/, foo/../target/)
+- Home paths (~/target/)
+
+27 unit tests + 1 cross-pack integration test.
+Commit: 15e1aaa
+All 729 lib tests + 41 E2E tests pass.
+
+- opus-session (Opus 4.5)
+
+---
+
 [2026-01-09T13:18:00-05:00] From: opus-dcg | Subject: Completed CI workflows (git_safety_guard-7tg.4)
 
 Completed git_safety_guard-7tg.4 (CI workflows: core suite vs deep suite).
