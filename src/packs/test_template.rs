@@ -55,45 +55,7 @@ mod pack_test_template {
     #[test]
     fn test_pack_creation() {
         let pack = example_pack::create_pack();
-
-        // Verify pack metadata
-        assert!(!pack.id.is_empty(), "Pack should have an ID");
-        assert!(!pack.name.is_empty(), "Pack should have a name");
-        assert!(
-            !pack.description.is_empty(),
-            "Pack should have a description"
-        );
-        assert!(
-            !pack.keywords.is_empty(),
-            "Pack should have keywords for quick-reject"
-        );
-
-        // Verify patterns exist
-        assert!(
-            !pack.destructive_patterns.is_empty(),
-            "Pack should have destructive patterns"
-        );
-        // Note: safe_patterns may be empty for some packs
-
-        // Verify patterns compile and have required fields
-        assert_patterns_compile(&pack);
-        assert_all_patterns_have_reasons(&pack);
-        assert_unique_pattern_names(&pack);
-    }
-
-    /// Verify the pack has the correct ID format.
-    #[test]
-    fn test_pack_id_format() {
-        let pack = example_pack::create_pack();
-
-        // Pack IDs should be lowercase, dot-separated
-        assert!(
-            pack.id
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c == '.' || c == '_'),
-            "Pack ID '{}' should be lowercase with dots/underscores only",
-            pack.id
-        );
+        validate_pack(&pack);
     }
 
     // =========================================================================
@@ -409,6 +371,32 @@ mod pack_test_template {
         ];
 
         test_batch_allows(&pack, &readonly_commands);
+    }
+
+    // =========================================================================
+    // SECTION 9: Logged Batch Tests (Recommended for CI)
+    // =========================================================================
+    //
+    // Use LoggedPackTestRunner for detailed JSON reporting of test results.
+    // This is especially useful for CI/CD pipelines.
+
+    #[test]
+    fn test_logged_batch_execution() {
+        let pack = example_pack::create_pack();
+        let mut runner = LoggedPackTestRunner::debug(&pack);
+
+        // Batch test blocking commands
+        runner.assert_blocks("git reset --hard", "destroys uncommitted");
+        runner.assert_blocks("git push --force", "destroy remote");
+
+        // Batch test allowing commands
+        runner.assert_allows("git status");
+        runner.assert_allows("git log");
+
+        // Finish and get report (in CI this would be written to a file)
+        let report = runner.finish();
+        assert!(report.contains("core.git"));
+        assert!(report.contains("passed"));
     }
 }
 

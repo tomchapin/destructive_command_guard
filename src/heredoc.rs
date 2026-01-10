@@ -477,7 +477,7 @@ impl ScriptLanguage {
             loop {
                 let next = parts.next()?;
                 // Skip flags (start with -) AND variable assignments (contain =)
-                // Note: this is a heuristic; in theory, a command name could contain =, 
+                // Note: this is a heuristic; in theory, a command name could contain =,
                 // but it's very rare for interpreters.
                 if !next.starts_with('-') && !next.contains('=') {
                     let next_basename = next.rsplit('/').next().unwrap_or(next);

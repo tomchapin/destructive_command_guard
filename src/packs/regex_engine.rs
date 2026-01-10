@@ -166,7 +166,11 @@ pub fn needs_backtracking_engine(pattern: &str) -> bool {
     // Possessive quantifiers: *+, ++, ?+, {n,m}+
     // Note: This is a heuristic. + can also be a literal or part of character class.
     // However, *+, ++, ?+ are almost always possessive quantifiers in this context.
-    if pattern.contains("*+") || pattern.contains("++") || pattern.contains("?+") || pattern.contains("}+") {
+    if pattern.contains("*+")
+        || pattern.contains("++")
+        || pattern.contains("?+")
+        || pattern.contains("}+")
+    {
         return true;
     }
 
@@ -290,7 +294,8 @@ impl LazyCompiledRegex {
     /// Returns `None` if no match or on execution/compile error.
     #[must_use]
     pub fn find(&self, haystack: &str) -> Option<(usize, usize)> {
-        self.get_compiled().and_then(|compiled| compiled.find(haystack))
+        self.get_compiled()
+            .and_then(|compiled| compiled.find(haystack))
     }
 
     /// Get the pattern string.

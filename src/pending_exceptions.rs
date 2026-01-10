@@ -746,15 +746,8 @@ mod tests {
             .with_timezone(&Utc);
         let redaction = redaction_config();
 
-        let pending = PendingExceptionRecord::new(
-            now,
-            "/repo",
-            "git status",
-            "ok",
-            &redaction,
-            false,
-            None,
-        );
+        let pending =
+            PendingExceptionRecord::new(now, "/repo", "git status", "ok", &redaction, false, None);
 
         let entry = AllowOnceEntry::from_pending(
             &pending,
@@ -786,15 +779,8 @@ mod tests {
             .with_timezone(&Utc);
         let redaction = redaction_config();
 
-        let pending = PendingExceptionRecord::new(
-            now,
-            "/repo",
-            "git status",
-            "ok",
-            &redaction,
-            false,
-            None,
-        );
+        let pending =
+            PendingExceptionRecord::new(now, "/repo", "git status", "ok", &redaction, false, None);
 
         let entry = AllowOnceEntry::from_pending(
             &pending,

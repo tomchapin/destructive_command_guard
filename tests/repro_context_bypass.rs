@@ -1,4 +1,4 @@
-use destructive_command_guard::context::{classify_command, SpanKind};
+use destructive_command_guard::context::{SpanKind, classify_command};
 
 #[test]
 fn test_bash_rcfile_inline_bypass() {
@@ -18,7 +18,7 @@ fn test_bash_rcfile_inline_bypass() {
     assert!(inline_span.is_some(), "Should find the rm -rf span");
     let span = inline_span.unwrap();
 
-    // It MUST be InlineCode (or Executed/Unknown/HeredocBody). 
+    // It MUST be InlineCode (or Executed/Unknown/HeredocBody).
     // It MUST NOT be Argument or Data.
     println!("Span kind: {:?}", span.kind);
     assert!(
@@ -33,8 +33,13 @@ fn test_complex_args_bypass() {
     // Another variant with multiple args
     let cmd = "python -B -v -c \"import os; os.system('rm -rf /')\"";
     let spans = classify_command(cmd);
-    
-    let inline_span = spans.spans().iter().find(|s| s.kind == SpanKind::InlineCode);
-    assert!(inline_span.is_some(), "Should detect python -c even with multiple flags");
-}
 
+    let inline_span = spans
+        .spans()
+        .iter()
+        .find(|s| s.kind == SpanKind::InlineCode);
+    assert!(
+        inline_span.is_some(),
+        "Should detect python -c even with multiple flags"
+    );
+}

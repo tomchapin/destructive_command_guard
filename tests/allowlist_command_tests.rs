@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::io::Write;
+use std::process::Command;
 
 fn dcg_binary() -> std::path::PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -53,25 +53,31 @@ fn run_hook_with_allowlist(command: &str, allowlist_content: &str) -> String {
 #[test]
 fn test_exact_command_allowlist_ignored_bug() {
     let cmd = "git reset --hard";
-    let allowlist = format!(r#"
+    let allowlist = format!(
+        r#"
 [[allow]]
 exact_command = "{}"
 reason = "allowed explicitly"
-"#, cmd);
+"#,
+        cmd
+    );
 
     let output = run_hook_with_allowlist(cmd, &allowlist);
-    
+
     // Currently, this should FAIL (be blocked) because ExactCommand is ignored.
     // If it is allowed (empty output), then it works (bug not present).
     // If it is blocked (contains "deny"), then bug is confirmed.
-    
+
     if !output.contains("deny") {
         println!("Wait, it was allowed? Maybe I am wrong.");
     } else {
         println!("Confirmed: Command blocked despite exact_command allowlist.");
     }
-    
+
     // We expect it to be allowed if the feature worked.
     // Asserting failure to confirm bug.
-    assert!(output.contains("deny"), "Bug confirmed: ExactCommand is ignored");
+    assert!(
+        output.contains("deny"),
+        "Bug confirmed: ExactCommand is ignored"
+    );
 }

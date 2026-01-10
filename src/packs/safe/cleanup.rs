@@ -135,23 +135,20 @@ fn create_safe_patterns() -> Vec<SafePattern> {
     // Unquoted pattern (strict, no spaces)
     let unquoted_prefix = r"(?![^\s]*\.\.)(?:\./)?(?:";
     let unquoted_suffix = r")(?:/[^\s;&|$()`<>]+)*/?";
-    let unquoted_pattern = format!("{}{}{}", unquoted_prefix, dir_group, unquoted_suffix);
+    let unquoted_pattern = format!("{unquoted_prefix}{dir_group}{unquoted_suffix}");
 
     // Double-quoted pattern (allows spaces, no " inside)
     let dquote_prefix = r#""(?![^"]*\.\.)(?:\./)?(?:"#;
     let dquote_suffix = r#")(?:/[^";&|$()`<>]+)*/?""#;
-    let dquote_pattern = format!("{}{}{}", dquote_prefix, dir_group, dquote_suffix);
+    let dquote_pattern = format!("{dquote_prefix}{dir_group}{dquote_suffix}");
 
     // Single-quoted pattern (allows spaces, no ' inside)
     let squote_prefix = r"'(?![^']*\.\.)(?:\./)?(?:";
     let squote_suffix = r")(?:/[^';&|$()`<>]+)*/?'";
-    let squote_pattern = format!("{}{}{}", squote_prefix, dir_group, squote_suffix);
+    let squote_pattern = format!("{squote_prefix}{dir_group}{squote_suffix}");
 
     // Combine all variants
-    let safe_path_pattern = format!(
-        "(?:{}|{}|{})",
-        unquoted_pattern, dquote_pattern, squote_pattern
-    );
+    let safe_path_pattern = format!("(?:{unquoted_pattern}|{dquote_pattern}|{squote_pattern})",);
 
     // One or more safe paths separated by whitespace.
     let safe_path_list = format!(r"{safe_path_pattern}(?:\s+{safe_path_pattern})*");
@@ -636,19 +633,19 @@ mod tests {
     #[test]
     fn allows_quoted_paths() {
         let pack = pack();
-        
+
         // Double quotes
         assert!(pack.matches_safe(r#"rm -rf "target""#));
         assert!(pack.matches_safe(r#"rm -rf "target/""#));
         assert!(pack.matches_safe(r#"rm -rf "target/debug""#));
         assert!(pack.matches_safe(r#"rm -rf "./target""#));
-        
+
         // Single quotes
         assert!(pack.matches_safe(r"rm -rf 'target'"));
         assert!(pack.matches_safe(r"rm -rf 'target/'"));
         assert!(pack.matches_safe(r"rm -rf 'target/debug'"));
         assert!(pack.matches_safe(r"rm -rf './target'"));
-        
+
         // Mixed quotes in one command (e.g. rm -rf "target" 'dist')
         assert!(pack.matches_safe(r#"rm -rf "target" 'dist'"#));
     }
@@ -656,12 +653,12 @@ mod tests {
     #[test]
     fn blocks_traversal_inside_quotes() {
         let pack = pack();
-        
+
         // Double quotes
         assert!(!pack.matches_safe(r#"rm -rf "target/..""#));
         assert!(!pack.matches_safe(r#"rm -rf "target/../""#));
         assert!(!pack.matches_safe(r#"rm -rf "target/../foo""#));
-        
+
         // Single quotes
         assert!(!pack.matches_safe(r"rm -rf 'target/..'"));
         assert!(!pack.matches_safe(r"rm -rf 'target/../'"));

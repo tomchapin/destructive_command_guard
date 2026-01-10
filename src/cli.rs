@@ -3,8 +3,8 @@
 //! This module provides the command-line interface for dcg (`destructive_command_guard`),
 //! including subcommands for configuration management and pack information.
 
-use clap::{Args, Parser, Subcommand};
 use chrono::Utc;
+use clap::{Args, Parser, Subcommand};
 
 use crate::config::Config;
 use crate::evaluator::{EvaluationDecision, MatchSource, evaluate_command_with_pack_order};
@@ -4159,10 +4159,8 @@ fn handle_allow_once_command(
     } else {
         std::path::PathBuf::from(&selected.cwd)
     };
-    let repo_root = crate::config::find_repo_root(
-        &selected_cwd,
-        crate::config::REPO_ROOT_SEARCH_MAX_HOPS,
-    );
+    let repo_root =
+        crate::config::find_repo_root(&selected_cwd, crate::config::REPO_ROOT_SEARCH_MAX_HOPS);
     let (scope_kind, scope_path) = repo_root.map_or_else(
         || (AllowOnceScopeKind::Cwd, selected_cwd.clone()),
         |root| (AllowOnceScopeKind::Project, root),
@@ -5229,12 +5227,7 @@ fn dev_debug(config: &Config, command: &str, all_packs: bool) {
 
 /// Run pattern matching benchmarks
 #[allow(clippy::cast_precision_loss)]
-fn dev_benchmark(
-    config: &Config,
-    pack_id: &str,
-    iterations: usize,
-    commands: Option<Vec<String>>,
-) {
+fn dev_benchmark(config: &Config, pack_id: &str, iterations: usize, commands: Option<Vec<String>>) {
     use colored::Colorize;
     use std::time::Instant;
 
@@ -5338,9 +5331,7 @@ fn dev_generate_fixtures(
 
     println!(
         "{}",
-        format!("Generating fixtures for: {pack_id}")
-            .bold()
-            .cyan()
+        format!("Generating fixtures for: {pack_id}").bold().cyan()
     );
     println!();
 
