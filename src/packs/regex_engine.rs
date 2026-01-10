@@ -544,7 +544,7 @@ mod tests {
             "git reset --hard",
             "git reset --hard HEAD",
             "  git reset --hard  ",
-            "git status", // No match
+            "git status",   // No match
             "reset --hard", // No match
             "",
         ];
@@ -574,7 +574,11 @@ mod tests {
 
         for input in inputs {
             let lazy_span = lazy.find_span(input);
-            let eager_span = eager.find(input).ok().flatten().map(|m| (m.start(), m.end()));
+            let eager_span = eager
+                .find(input)
+                .ok()
+                .flatten()
+                .map(|m| (m.start(), m.end()));
             assert_eq!(lazy_span, eager_span, "Span mismatch for input: {input:?}");
         }
     }

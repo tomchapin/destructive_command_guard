@@ -6,7 +6,7 @@
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::time::Duration;
 
 /// Input structure from Claude Code's `PreToolUse` hook.
@@ -80,6 +80,8 @@ pub enum HookResult {
 pub enum HookReadError {
     /// Failed to read from stdin.
     Io(io::Error),
+    /// Input exceeded the configured size limit.
+    InputTooLarge(usize),
     /// Failed to parse JSON input.
     Json(serde_json::Error),
 }
@@ -88,14 +90,22 @@ pub enum HookReadError {
 ///
 /// # Errors
 ///
-/// Returns [`HookReadError::Io`] if stdin cannot be read, or [`HookReadError::Json`]
-/// if the input is not valid hook JSON.
-pub fn read_hook_input() -> Result<HookInput, HookReadError> {
+/// Returns [`HookReadError::Io`] if stdin cannot be read, [`HookReadError::Json`]
+/// if the input is not valid hook JSON, or [`HookReadError::InputTooLarge`] if
+/// the input exceeds `max_bytes`.
+pub fn read_hook_input(max_bytes: usize) -> Result<HookInput, HookReadError> {
     let mut input = String::with_capacity(256);
     {
         let stdin = io::stdin();
-        let mut handle = stdin.lock();
-        handle.read_line(&mut input).map_err(HookReadError::Io)?;
+        // Read up to limit + 1 to detect overflow
+        let mut handle = stdin.lock().take(max_bytes as u64 + 1);
+        handle
+            .read_to_string(&mut input)
+            .map_err(HookReadError::Io)?;
+    }
+
+    if input.len() > max_bytes {
+        return Err(HookReadError::InputTooLarge(input.len()));
     }
 
     serde_json::from_str(&input).map_err(HookReadError::Json)

@@ -124,9 +124,10 @@ fn create_safe_patterns() -> Vec<SafePattern> {
     // - no ".." segments
     // - optional "./" prefix
     // - exact directory allowlist at path start
-    // - optional subpaths (no shell separators)
+    // - optional subpaths (no shell separators OR injection characters)
     let safe_path_prefix = r"(?![^\s]*\.\.)(?:\./)?(?:";
-    let safe_path_suffix = r")(?:/[^\s;&|]+)*/?";
+    // Explicitly exclude shell metacharacters: space ; & | $ ( ) ` < >
+    let safe_path_suffix = r")(?:/[^\s;&|$()`<>]+)*/?";
     let mut safe_path_pattern =
         String::with_capacity(safe_path_prefix.len() + dir_group.len() + safe_path_suffix.len());
     safe_path_pattern.push_str(safe_path_prefix);
@@ -591,6 +592,29 @@ mod tests {
         assert!(
             pack.matches_safe("rm -v --recursive --force target/"),
             "rm -v --recursive --force target/ should be allowed"
+        );
+    }
+
+    #[test]
+    fn blocks_shell_injection_in_path() {
+        let pack = pack();
+        // Security: Paths containing shell injection sequences must not be matched as safe subpaths.
+        // If matched, the outer rm would be allowed, but the shell would execute the inner command first.
+
+        // With spaces (already blocked by \s exclusion)
+        assert!(
+            !pack.matches_safe("rm -rf target/$(rm -rf /)"),
+            "rm -rf target/$(rm -rf /) should NOT be allowed (command injection)"
+        );
+
+        // Without spaces (previously allowed!)
+        assert!(
+            !pack.matches_safe("rm -rf target/$(reboot)"),
+            "rm -rf target/$(reboot) should NOT be allowed (command injection no spaces)"
+        );
+        assert!(
+            !pack.matches_safe("rm -rf target/`reboot`"),
+            "rm -rf target/`reboot` should NOT be allowed (command injection no spaces)"
         );
     }
 }

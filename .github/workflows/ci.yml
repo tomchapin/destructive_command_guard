@@ -51,6 +51,21 @@ jobs:
         run: |
           cargo nextest run --profile ci --no-fail-fast
 
+      - name: Generate test summary
+        if: always()
+        run: |
+          echo "## Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Count pack tests
+          PACK_TESTS=$(cargo test packs:: -- --list 2>/dev/null | grep -c "test$" || echo "0")
+          TOTAL_TESTS=$(cargo test -- --list 2>/dev/null | grep -c "test$" || echo "0")
+
+          echo "| Category | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Total Tests | $TOTAL_TESTS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Pack Tests | $PACK_TESTS |" >> $GITHUB_STEP_SUMMARY
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4

@@ -7,6 +7,13 @@ description = "git reset --hard discards uncommitted changes"
 command = "git reset --hard"
 expected = "deny"
 rule_id = "core.git:reset-hard"
+[case.log]
+decision = "deny"
+mode = "deny"
+pack_id = "core.git"
+pattern_name = "reset-hard"
+rule_id = "core.git:reset-hard"
+reason_contains = "destroys uncommitted changes"
 
 [[case]]
 description = "git reset --hard with ref"
@@ -56,10 +63,10 @@ rule_id = "core.git:branch-force-delete"
 description = "git push --force"
 command = "git push --force origin main"
 expected = "deny"
-rule_id = "core.git:push-force"
+rule_id = "core.git:push-force-long"
 
 [[case]]
 description = "git push -f (short form)"
 command = "git push -f origin main"
 expected = "deny"
-rule_id = "core.git:push-force"
+rule_id = "core.git:push-force-short"

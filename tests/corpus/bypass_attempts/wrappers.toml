@@ -28,7 +28,7 @@ rule_id = "core.git:clean-force"
 description = "sudo git push --force is blocked"
 command = "sudo git push --force origin main"
 expected = "deny"
-rule_id = "core.git:push-force"
+rule_id = "core.git:push-force-long"
 
 # ============================================================================
 # env prefix (should still block)

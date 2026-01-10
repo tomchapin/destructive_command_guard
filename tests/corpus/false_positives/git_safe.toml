@@ -121,3 +121,28 @@ expected = "allow"
 description = "git tag is safe"
 command = "git tag v1.0.0"
 expected = "allow"
+
+[[case]]
+description = "sudo git status is safe (wrapper prefix)"
+command = "sudo git status"
+expected = "allow"
+
+[[case]]
+description = "env prefix with git status is safe"
+command = "env FOO=1 git status"
+expected = "allow"
+
+[[case]]
+description = "command wrapper with git status is safe"
+command = "command git status"
+expected = "allow"
+
+[[case]]
+description = "backslash-escaped git status is safe"
+command = "\\git status"
+expected = "allow"
+
+[[case]]
+description = "git commit message containing rm -rf is safe"
+command = "git commit -m \"Fix rm -rf detection\""
+expected = "allow"

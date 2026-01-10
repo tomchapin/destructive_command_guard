@@ -1416,6 +1416,14 @@ fn contains_path_traversal(path: &str) -> bool {
     path.contains("/../") || path.ends_with("/..") || path.starts_with("../") || path == ".."
 }
 
+fn has_path_prefix(path: &str, prefix: &str) -> bool {
+    if !path.starts_with(prefix) {
+        return false;
+    }
+    // It starts with prefix. It's a match if exact match OR next char is separator.
+    path.len() == prefix.len() || path.as_bytes()[prefix.len()] == b'/'
+}
+
 fn is_catastrophic_path(path: &str) -> bool {
     // Root or home always catastrophic
     if matches!(path, "/" | "~") || path.starts_with("~/") {
@@ -1424,18 +1432,17 @@ fn is_catastrophic_path(path: &str) -> bool {
 
     // Temp directories are safe UNLESS they contain path traversal.
     // Path traversal can escape temp directories (e.g., /tmp/../etc -> /etc).
-    if path.starts_with("/tmp") || path.starts_with("/var/tmp") {
+    if has_path_prefix(path, "/tmp") || has_path_prefix(path, "/var/tmp") {
         return contains_path_traversal(path);
     }
 
     // Standard catastrophic system paths
-    path.starts_with("/etc")
-        || path.starts_with("/home")
-        || path.starts_with("/usr")
-        || path.starts_with("/bin")
-        || path.starts_with("/sbin")
-        || path.starts_with("/lib")
-        || path.starts_with("/lib64")
+    let sys_dirs = [
+        "/etc", "/home", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/var", "/boot", "/root",
+        "/opt", "/sys", "/proc", "/dev", "/mnt", "/media", "/srv", "/run",
+    ];
+
+    sys_dirs.iter().any(|&dir| has_path_prefix(path, dir))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2804,7 +2811,7 @@ mod tests {
         #[test]
         fn execsync_git_reset_hard_blocks_inside_decorated_class() {
             let matcher = AstMatcher::new();
-            let code = "@sealed\nclass Danger {\n  run(): void {\n    require('child_process').execSync('git reset --hard');\n  }\n}\n";
+            let code = "import * as child_process from 'child_process';\n@sealed\nclass Danger {\n  run(): void {\n    require('child_process').execSync('git reset --hard');\n  }\n}\n";
 
             let matches = matcher
                 .find_matches(code, ScriptLanguage::TypeScript)
@@ -3123,6 +3130,45 @@ def cleanup():
             let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             // Pattern matching finds this - path filtering is separate policy
             assert!(!matches.is_empty(), "shutil.rmtree matches structurally");
+        }
+    }
+
+    mod catastrophic_paths {
+        use super::*;
+
+        #[test]
+        fn test_is_catastrophic_path_loose_prefix() {
+            // These should NOT be catastrophic
+            assert!(!is_catastrophic_path("/bin_logs"));
+            assert!(!is_catastrophic_path("/usr_local"));
+            assert!(!is_catastrophic_path("/etc_backup"));
+            assert!(!is_catastrophic_path("/home_page.html"));
+        }
+
+        #[test]
+        fn test_is_catastrophic_path_strict_prefix() {
+            // These SHOULD be catastrophic
+            assert!(is_catastrophic_path("/bin"));
+            assert!(is_catastrophic_path("/bin/"));
+            assert!(is_catastrophic_path("/bin/sh"));
+            assert!(is_catastrophic_path("/usr"));
+            assert!(is_catastrophic_path("/usr/local"));
+            assert!(is_catastrophic_path("/etc/passwd"));
+        }
+
+        #[test]
+        fn test_is_catastrophic_path_var() {
+            // /var should be catastrophic
+            assert!(is_catastrophic_path("/var"));
+            assert!(is_catastrophic_path("/var/www"));
+            assert!(is_catastrophic_path("/var/log"));
+        }
+
+        #[test]
+        fn test_is_catastrophic_path_tmp_backup_not_catastrophic() {
+            // /tmp_backup should NOT be matched as /tmp (and thus fall through to sys_dirs check)
+            // Since it's not in sys_dirs, it should return false.
+            assert!(!is_catastrophic_path("/tmp_backup"));
         }
     }
 }

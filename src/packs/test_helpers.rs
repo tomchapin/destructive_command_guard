@@ -91,24 +91,22 @@ pub fn assert_blocks_with_pattern(pack: &Pack, command: &str, expected_pattern_n
     let result = pack.check(command);
 
     match result {
-        Some(matched) => {
-            match matched.name {
-                Some(name) => {
-                    assert_eq!(
-                        name, expected_pattern_name,
-                        "Command '{command}' was blocked by pattern '{name}' but expected '{expected_pattern_name}'"
-                    );
-                }
-                None => {
-                    panic!(
-                        "Command '{}' was blocked but by an unnamed pattern.\n\
+        Some(matched) => match matched.name {
+            Some(name) => {
+                assert_eq!(
+                    name, expected_pattern_name,
+                    "Command '{command}' was blocked by pattern '{name}' but expected '{expected_pattern_name}'"
+                );
+            }
+            None => {
+                panic!(
+                    "Command '{}' was blocked but by an unnamed pattern.\n\
                          Expected pattern name: '{}'\n\
                          Reason: '{}'",
-                        command, expected_pattern_name, matched.reason
-                    );
-                }
+                    command, expected_pattern_name, matched.reason
+                );
             }
-        }
+        },
         None => {
             panic!(
                 "Expected pack '{}' to block command '{}' with pattern '{}' but it was allowed",
@@ -139,11 +137,7 @@ pub fn assert_blocks_with_severity(pack: &Pack, command: &str, expected_severity
                 "Command '{}' was blocked with severity {:?} but expected {:?}.\n\
                  Pattern: {:?}\n\
                  Reason: '{}'",
-                command,
-                matched.severity,
-                expected_severity,
-                matched.name,
-                matched.reason
+                command, matched.severity, expected_severity, matched.name, matched.reason
             );
         }
         None => {
@@ -174,11 +168,7 @@ pub fn assert_allows(pack: &Pack, command: &str) {
              Pattern: {:?}\n\
              Reason: '{}'\n\
              Severity: {:?}",
-            pack.id,
-            command,
-            matched.name,
-            matched.reason,
-            matched.severity
+            pack.id, command, matched.name, matched.reason, matched.severity
         );
     }
 }
@@ -240,10 +230,7 @@ pub fn assert_no_match(pack: &Pack, command: &str) {
             "Expected no patterns in pack '{}' to match command '{}' but destructive pattern matched.\n\
              Pattern: {:?}\n\
              Reason: '{}'",
-            pack.id,
-            command,
-            matched.name,
-            matched.reason
+            pack.id, command, matched.name, matched.reason
         );
     }
 }
@@ -344,8 +331,7 @@ pub fn test_batch_allows(pack: &Pack, commands: &[&str]) {
         if let Some(matched) = pack.check(cmd) {
             failures.push(format!(
                 "  '{cmd}': blocked by {:?} - '{}'",
-                matched.name,
-                matched.reason
+                matched.name, matched.reason
             ));
         }
     }
@@ -372,7 +358,11 @@ pub fn debug_match_info(pack: &Pack, command: &str) -> String {
         info,
         "  Keywords ({:?}): {}",
         pack.keywords,
-        if might_match { "MAY match" } else { "quick-rejected" }
+        if might_match {
+            "MAY match"
+        } else {
+            "quick-rejected"
+        }
     );
 
     if !might_match {
@@ -546,7 +536,8 @@ impl<'a> LoggedPackTestRunner<'a> {
                 matched.name,
                 Some(command),
             );
-            assert!(passed, 
+            assert!(
+                passed,
                 "Command '{}' blocked but with unexpected reason.\n\
                  Expected: '{}'\n\
                  Actual: '{}'",
@@ -600,19 +591,10 @@ impl<'a> LoggedPackTestRunner<'a> {
                 self.pack.id, command
             );
         } else {
-            self.logger.log_pattern_match(
-                "none",
-                command,
-                false,
-                duration_us,
-            );
-            self.logger.log_test_result_detailed(
-                "assert_allows",
-                true,
-                "",
-                None,
-                Some(command),
-            );
+            self.logger
+                .log_pattern_match("none", command, false, duration_us);
+            self.logger
+                .log_test_result_detailed("assert_allows", true, "", None, Some(command));
         }
     }
 
@@ -671,12 +653,12 @@ pub fn create_debug_runner(pack: &Pack) -> LoggedPackTestRunner<'_> {
 // This section provides utilities for golden/snapshot testing of the evaluator.
 // Use these helpers to verify that refactors preserve exact behavior.
 
+use crate::Config;
 use crate::allowlist::AllowlistLayer;
 use crate::evaluator::{
-    evaluate_command_with_pack_order, EvaluationDecision, EvaluationResult, MatchSource,
+    EvaluationDecision, EvaluationResult, MatchSource, evaluate_command_with_pack_order,
 };
 use crate::packs::{DecisionMode, REGISTRY};
-use crate::Config;
 use std::path::Path;
 
 /// A stable, comparable snapshot of an evaluation result for golden testing.
@@ -733,9 +715,10 @@ impl EvalSnapshot {
         });
 
         let (pack_id, pattern_name, rule_id, match_source, reason_preview, matched_text_preview) =
-            result.pattern_info.as_ref().map_or(
-                (None, None, None, None, None, None),
-                |info| {
+            result
+                .pattern_info
+                .as_ref()
+                .map_or((None, None, None, None, None, None), |info| {
                     let pack = info.pack_id.clone();
                     let pattern = info.pattern_name.clone();
                     let rule = pack
@@ -759,9 +742,15 @@ impl EvalSnapshot {
                     } else {
                         Some(info.reason.clone())
                     };
-                    (pack, pattern, rule, source, reason, info.matched_text_preview.clone())
-                },
-            );
+                    (
+                        pack,
+                        pattern,
+                        rule,
+                        source,
+                        reason,
+                        info.matched_text_preview.clone(),
+                    )
+                });
 
         let allowlist_layer = result.allowlist_override.as_ref().map(|ao| match ao.layer {
             AllowlistLayer::Project => "project".to_string(),
@@ -831,7 +820,7 @@ struct CorpusFile {
 }
 
 /// Category of corpus test based on directory name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CorpusCategory {
     /// Commands that should be denied (true positives).
     TruePositives,
@@ -876,8 +865,8 @@ impl CorpusCategory {
 pub fn load_corpus_file(path: &Path) -> Result<Vec<CorpusTestCase>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-    let corpus: CorpusFile = toml::from_str(&content)
-        .map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
+    let corpus: CorpusFile =
+        toml::from_str(&content).map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
     Ok(corpus.cases)
 }
 
@@ -889,9 +878,16 @@ pub fn load_corpus_file(path: &Path) -> Result<Vec<CorpusTestCase>, String> {
 ///
 /// Returns an error if any file cannot be read or parsed.
 #[allow(clippy::missing_errors_doc)]
-pub fn load_corpus_dir(dir: &Path) -> Result<Vec<(CorpusCategory, String, CorpusTestCase)>, String> {
+pub fn load_corpus_dir(
+    dir: &Path,
+) -> Result<Vec<(CorpusCategory, String, CorpusTestCase)>, String> {
     let mut cases = Vec::new();
-    let categories = ["true_positives", "false_positives", "bypass_attempts", "edge_cases"];
+    let categories = [
+        "true_positives",
+        "false_positives",
+        "bypass_attempts",
+        "edge_cases",
+    ];
 
     for category_name in &categories {
         let category_dir = dir.join(category_name);
@@ -910,7 +906,8 @@ pub fn load_corpus_dir(dir: &Path) -> Result<Vec<(CorpusCategory, String, Corpus
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "toml") {
                 let file_cases = load_corpus_file(&path)?;
-                let file_name = path.file_name()
+                let file_name = path
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
                 for case in file_cases {
@@ -1213,9 +1210,13 @@ pub fn assert_eval_snapshot(command: &str, expected: &EvalSnapshot) {
 pub fn assert_decision(command: &str, expected_decision: &str) {
     let snapshot = eval_snapshot(command);
     assert_eq!(
-        snapshot.decision, expected_decision,
+        snapshot.decision,
+        expected_decision,
         "Decision mismatch for command: {}\nExpected: {}\nActual: {}\nRule ID: {:?}\n\nReproduce: dcg explain '{}'",
-        command, expected_decision, snapshot.decision, snapshot.rule_id,
+        command,
+        expected_decision,
+        snapshot.decision,
+        snapshot.rule_id,
         command.replace('\'', "'\\''")
     );
 }
@@ -1237,7 +1238,9 @@ pub fn assert_denies_with_rule(command: &str, expected_rule_id: &str) {
         snapshot.rule_id.as_deref(),
         Some(expected_rule_id),
         "Rule mismatch for command: {}\nExpected: {}\nActual: {:?}",
-        command, expected_rule_id, snapshot.rule_id
+        command,
+        expected_rule_id,
+        snapshot.rule_id
     );
 }
 
@@ -1493,9 +1496,18 @@ mod tests {
 
     #[test]
     fn test_corpus_category_expected_decision() {
-        assert_eq!(CorpusCategory::TruePositives.expected_decision(), Some("deny"));
-        assert_eq!(CorpusCategory::BypassAttempts.expected_decision(), Some("deny"));
-        assert_eq!(CorpusCategory::FalsePositives.expected_decision(), Some("allow"));
+        assert_eq!(
+            CorpusCategory::TruePositives.expected_decision(),
+            Some("deny")
+        );
+        assert_eq!(
+            CorpusCategory::BypassAttempts.expected_decision(),
+            Some("deny")
+        );
+        assert_eq!(
+            CorpusCategory::FalsePositives.expected_decision(),
+            Some("allow")
+        );
         assert_eq!(CorpusCategory::EdgeCases.expected_decision(), None);
     }
 

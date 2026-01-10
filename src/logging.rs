@@ -663,7 +663,11 @@ impl PackTestLogger {
             duration_ms,
             pattern_matched: pattern_matched.map(String::from),
             input: input.map(String::from),
-            error: if passed { None } else { Some(details.to_string()) },
+            error: if passed {
+                None
+            } else {
+                Some(details.to_string())
+            },
         };
 
         if self.json_mode {

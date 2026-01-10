@@ -6,37 +6,43 @@
 description = "rm -rf with root path"
 command = "rm -rf /"
 expected = "deny"
-rule_id = "core.rm:recursive-root"
+rule_id = "core.filesystem:rm-rf-root-home"
 
 [[case]]
 description = "rm -rf with home directory"
 command = "rm -rf ~"
 expected = "deny"
-rule_id = "core.rm:recursive-home"
+rule_id = "core.filesystem:rm-rf-root-home"
 
 [[case]]
 description = "rm -rf with home expansion"
 command = "rm -rf $HOME"
 expected = "deny"
-rule_id = "core.rm:recursive-home"
+rule_id = "core.filesystem:rm-rf-general"
 
 [[case]]
 description = "rm -rf with glob"
 command = "rm -rf *"
 expected = "deny"
-rule_id = "core.rm:recursive-glob"
+rule_id = "core.filesystem:rm-rf-general"
 
 [[case]]
 description = "rm -rf with hidden files glob"
 command = "rm -rf .*"
 expected = "deny"
-rule_id = "core.rm:recursive-hidden-glob"
+rule_id = "core.filesystem:rm-rf-general"
 
 [[case]]
 description = "rm -rf on relative path (still blocked)"
 command = "rm -rf ./build"
 expected = "deny"
-rule_id = "core.rm:recursive-force"
+rule_id = "core.filesystem:rm-rf-general"
+
+[[case]]
+description = "rm --recursive --force outside temp is blocked"
+command = "rm --recursive --force /etc"
+expected = "deny"
+rule_id = "core.filesystem:rm-recursive-force-long"
 
 # NOTE: rm -r -f (separated flags) is not currently detected.
 # The pattern expects -rf or -fr combined. This is a gap.

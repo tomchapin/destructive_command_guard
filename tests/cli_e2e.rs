@@ -680,9 +680,9 @@ mod hook_mode_tests {
         // pattern "rm -rf /" is hidden from the evaluator.
         //
         // Once fixed, this test should be updated to expect denial.
-        
+
         let cmd = "echo rm -rf / | sh";
-        
+
         // FIXED: Should now be denied because pipe disables echo argument masking
         assert_hook_denies(cmd);
     }
@@ -692,10 +692,10 @@ mod hook_mode_tests {
         // REPRO: This test confirms that `env -S "git reset --hard"` is currently ALLOWED
         // because `strip_env` does not handle `-S` (split string) correctly to extract the inner command.
         // `env -S` is commonly used in shebangs but also valid in shell.
-        
+
         let cmd = "env -S \"git reset --hard\"";
-        
-        // FIXED: Should now be denied because we handle -S as taking an argument, 
+
+        // FIXED: Should now be denied because we handle -S as taking an argument,
         // preventing normalization stripping, and classify the argument as InlineCode.
         assert_hook_denies(cmd);
     }

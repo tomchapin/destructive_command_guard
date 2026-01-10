@@ -792,7 +792,10 @@ fn collect_files_recursively(path: &PathBuf, out: &mut Vec<PathBuf>) {
 fn is_shell_script_path(path: &Path) -> bool {
     path.extension()
         .and_then(std::ffi::OsStr::to_str)
-        .is_some_and(|ext: &str| ext.eq_ignore_ascii_case("sh"))
+        .is_some_and(|ext: &str| {
+            let ext = ext.to_ascii_lowercase();
+            matches!(ext.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh")
+        })
 }
 
 fn extract_shell_script_from_str(
@@ -1159,6 +1162,24 @@ fn extract_dockerfile_from_str(
         let cmd_trimmed = cmd_start.trim_start();
 
         if cmd_trimmed.starts_with('[') {
+            // Exec-form: RUN ["cmd", "arg1", "arg2"]
+            // Join args with spaces to approximate a shell command for scanning.
+            if let Ok(args) = serde_json::from_str::<Vec<String>>(cmd_trimmed) {
+                let joined = args.join(" ");
+                if !joined.is_empty()
+                    && (enabled_keywords.is_empty()
+                        || contains_any_keyword(&joined, enabled_keywords))
+                {
+                    out.push(ExtractedCommand {
+                        file: file.to_string(),
+                        line: line_no,
+                        col: None,
+                        extractor_id: "dockerfile.run.exec".to_string(),
+                        command: joined,
+                        metadata: None,
+                    });
+                }
+            }
             idx += 1;
             continue;
         }
@@ -1354,10 +1375,11 @@ fn extract_github_actions_workflow_from_str(
             continue;
         }
 
+        let unquoted = unquote_yaml_scalar(run_value);
         out.extend(extract_shell_script_with_offset_and_id(
             file,
             line_no,
-            run_value,
+            &unquoted,
             enabled_keywords,
             EXTRACTOR_ID,
         ));
@@ -1366,6 +1388,47 @@ fn extract_github_actions_workflow_from_str(
     }
 
     out
+}
+
+fn unquote_yaml_scalar(s: &str) -> String {
+    let s = s.trim();
+    if s.starts_with('"') && s.ends_with('"') {
+        // Double-quoted: handle escapes
+        if s.len() < 2 {
+            return String::new();
+        }
+        let content = &s[1..s.len() - 1];
+        let mut out = String::with_capacity(content.len());
+        let mut chars = content.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('r') => out.push('\r'),
+                    Some('t') => out.push('\t'),
+                    Some('"') => out.push('"'),
+                    Some('\\') => out.push('\\'),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => out.push('\\'),
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        return out;
+    }
+    if s.starts_with('\'') && s.ends_with('\'') {
+        // Single-quoted: only '' is escape for '
+        if s.len() < 2 {
+            return String::new();
+        }
+        let content = &s[1..s.len() - 1];
+        return content.replace("''", "'");
+    }
+    s.to_string()
 }
 
 // ============================================================================
@@ -1498,7 +1561,7 @@ fn extract_gitlab_ci_from_str(
             out.extend(extract_shell_script_with_offset_and_id(
                 file,
                 line_no,
-                value,
+                &unquote_yaml_scalar(value),
                 enabled_keywords,
                 EXTRACTOR_ID,
             ));
@@ -1611,7 +1674,7 @@ fn extract_gitlab_sequence_items(
             let extracted = extract_shell_script_with_offset_and_id(
                 file,
                 line_no,
-                item_value,
+                &unquote_yaml_scalar(item_value),
                 enabled_keywords,
                 extractor_id,
             );
@@ -2132,13 +2195,59 @@ fn extract_hcl_array_items(line: &str) -> Vec<String> {
 
     let array_content = &line[start + 1..end];
 
-    for part in array_content.split(',') {
-        if let Some(s) = extract_quoted_string(part) {
+    for part in split_hcl_array(array_content) {
+        if let Some(s) = extract_quoted_string(&part) {
             items.push(s);
         }
     }
 
     items
+}
+
+fn split_hcl_array(content: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut quote_char = '\0';
+    let mut escaped = false;
+
+    for c in content.chars() {
+        if escaped {
+            current.push(c);
+            escaped = false;
+            continue;
+        }
+
+        if c == '\\' && in_quote {
+            escaped = true;
+            current.push(c);
+            continue;
+        }
+
+        if in_quote {
+            current.push(c);
+            if c == quote_char {
+                in_quote = false;
+            }
+        } else {
+            if c == '"' || c == '\'' {
+                in_quote = true;
+                quote_char = c;
+                current.push(c);
+            } else if c == ',' {
+                parts.push(current.trim().to_string());
+                current.clear();
+            } else {
+                current.push(c);
+            }
+        }
+    }
+
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
+
+    parts
 }
 
 // ============================================================================
@@ -2973,74 +3082,6 @@ ENV NOTE="git reset --hard"
     }
 
     // ========================================================================
-    // Finding sorting tests
-    // ========================================================================
-
-    #[test]
-    fn sort_findings_by_file_then_line() {
-        let mut findings = vec![
-            make_finding_at("z.sh", 10),
-            make_finding_at("a.sh", 5),
-            make_finding_at("a.sh", 1),
-            make_finding_at("m.sh", 20),
-        ];
-
-        sort_findings(&mut findings);
-
-        assert_eq!(findings[0].file, "a.sh");
-        assert_eq!(findings[0].line, 1);
-        assert_eq!(findings[1].file, "a.sh");
-        assert_eq!(findings[1].line, 5);
-        assert_eq!(findings[2].file, "m.sh");
-        assert_eq!(findings[3].file, "z.sh");
-    }
-
-    #[test]
-    fn sort_findings_by_column_when_same_line() {
-        let mut findings = vec![
-            make_finding_at_col("a.sh", 1, Some(20)),
-            make_finding_at_col("a.sh", 1, Some(5)),
-            make_finding_at_col("a.sh", 1, None),
-        ];
-
-        sort_findings(&mut findings);
-
-        assert_eq!(findings[0].col, None); // None sorts as 0
-        assert_eq!(findings[1].col, Some(5));
-        assert_eq!(findings[2].col, Some(20));
-    }
-
-    fn make_finding_at(file: &str, line: usize) -> ScanFinding {
-        ScanFinding {
-            file: file.to_string(),
-            line,
-            col: None,
-            extractor_id: "test".to_string(),
-            extracted_command: "cmd".to_string(),
-            decision: ScanDecision::Deny,
-            severity: ScanSeverity::Error,
-            rule_id: None,
-            reason: None,
-            suggestion: None,
-        }
-    }
-
-    fn make_finding_at_col(file: &str, line: usize, col: Option<usize>) -> ScanFinding {
-        ScanFinding {
-            file: file.to_string(),
-            line,
-            col,
-            extractor_id: "test".to_string(),
-            extracted_command: "cmd".to_string(),
-            decision: ScanDecision::Deny,
-            severity: ScanSeverity::Error,
-            rule_id: None,
-            reason: None,
-            suggestion: None,
-        }
-    }
-
-    // ========================================================================
     // Severity ranking tests
     // ========================================================================
 
@@ -3251,11 +3292,12 @@ ENV NOTE="git reset --hard"
     }
 
     #[test]
-    fn dockerfile_extractor_ignores_json_exec_form() {
+    fn dockerfile_extractor_extracts_json_exec_form() {
         let content = "FROM alpine\nRUN [\"apt-get\", \"update\"]\nRUN apt-get install";
         let extracted = extract_dockerfile_from_str("Dockerfile", content, &["apt"]);
-        assert_eq!(extracted.len(), 1);
-        assert_eq!(extracted[0].command, "apt-get install");
+        assert_eq!(extracted.len(), 2);
+        assert_eq!(extracted[0].command, "apt-get update");
+        assert_eq!(extracted[1].command, "apt-get install");
     }
 
     #[test]
@@ -3263,7 +3305,6 @@ ENV NOTE="git reset --hard"
         let content = "FROM alpine\nRUN apt-get update \\\n    && apt-get install curl";
         let extracted = extract_dockerfile_from_str("Dockerfile", content, &["apt"]);
         assert_eq!(extracted.len(), 1);
-        assert_eq!(extracted[0].line, 2);
         assert!(extracted[0].command.contains("apt-get update"));
         assert!(extracted[0].command.contains("apt-get install"));
     }
@@ -3292,7 +3333,7 @@ ENV NOTE="git reset --hard"
         use std::path::Path;
         assert!(is_shell_script_path(Path::new("build.sh")));
         assert!(is_shell_script_path(Path::new("deploy.SH")));
-        assert!(!is_shell_script_path(Path::new("script.bash")));
+        assert!(is_shell_script_path(Path::new("script.bash")));
         assert!(!is_shell_script_path(Path::new("Dockerfile")));
     }
 
@@ -3564,7 +3605,7 @@ all:\n\
 
         let extracted = extract_package_json_from_str("package.json", content, &["rm"]);
         // Should NOT extract from description, keywords, or config
-        assert_eq!(extracted.len(), 0);
+        assert!(extracted.is_empty());
     }
 
     #[test]

@@ -73,8 +73,9 @@ Behavior invariants and schema details:
 
 ## Canonical Corpus Coverage (MUST remain stable)
 
-The regression corpus is the canonical command set for isomorphism and
-behavior stability. Coverage matrix:
+The regression corpus provides the baseline command set for isomorphism and
+behavior stability. The canonical corpus adds expected log outputs on top of
+these commands for golden/e2e verification. Coverage matrix:
 
 ### Category: Git Commands
 | Behavior | File | Examples |
@@ -144,14 +145,14 @@ behavior stability. Coverage matrix:
 | Escapes | `edge_cases/quoting.toml` | \git reset (blocked) |
 | Mixed | `edge_cases/quoting.toml` | python -c "print('x')" |
 
-## Non‑Negotiable Behavior Invariants
+## Non-Negotiable Behavior Invariants
 
 These invariants must never change without an explicit design review:
 
 ### 1. Pack Evaluation Order
 - Packs are evaluated in **deterministic tier order** (safe packs first, then by tier).
 - Within a tier, packs are ordered **lexicographically by pack_id**.
-- This ensures reproducible attribution (same input → same pack/pattern match).
+- This ensures reproducible attribution (same input -> same pack/pattern match).
 
 ### 2. Safe-Before-Destructive Pattern Order
 - For any command, **all safe patterns** across all enabled packs are checked first.
@@ -159,7 +160,7 @@ These invariants must never change without an explicit design review:
 - This enables cross-pack whitelisting (e.g., `safe.cleanup` can whitelist `rm -rf target/`).
 
 ### 3. Allowlist Bypass Scope
-- Allowlists only bypass the **decision** (deny → allow), not parsing/normalization.
+- Allowlists only bypass the **decision** (deny -> allow), not parsing/normalization.
 - Allowlist matches are logged with `allowlist_override` field.
 - Allowlist lookup happens **after** pattern matching, not before.
 
@@ -179,8 +180,8 @@ These invariants must never change without an explicit design review:
 ### 6. Wrapper Stripping Behavior
 - Known prefixes are stripped **before** pattern matching:
   - `sudo`, `env`, `command`, `builtin`, `exec`, `nohup`, `nice`, `time`
-  - Full paths: `/usr/bin/git` → `git`, `/bin/rm` → `rm`
-  - Backslash escapes: `\git` → `git`
+  - Full paths: `/usr/bin/git` -> `git`, `/bin/rm` -> `rm`
+  - Backslash escapes: `\git` -> `git`
 - Stripping is **deterministic** and happens in fixed order.
 - Unknown prefixes are NOT stripped (conservative default).
 

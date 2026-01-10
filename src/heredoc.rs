@@ -191,7 +191,7 @@ pub enum ScriptLanguage {
 }
 
 impl ScriptLanguage {
-    /// Infer language from a command prefix (e.g., "python3", "ruby").
+    /// Infer language from a command prefix (e.g., "python", "python3", "python3.11").
     ///
     /// Matches exact command names or names with version suffixes (e.g., "python3.11").
     /// Does NOT match arbitrary words that start with a command name (e.g., "shebang" ≠ "sh").
@@ -417,13 +417,28 @@ impl ScriptLanguage {
     /// Returns a tuple of (language, confidence) for explainability.
     #[must_use]
     pub fn detect(cmd: &str, content: &str) -> (Self, DetectionConfidence) {
-        // Priority 1: Extract interpreter from command
-        // Handle formats like: "python3 -c", "/usr/bin/python -c", "env python3"
-        let cmd_interpreter = Self::extract_interpreter(cmd);
-        if let Some(interpreter) = cmd_interpreter {
+        // Priority 1: Extract interpreter from command prefix
+        if let Some(interpreter) = Self::extract_head_interpreter(cmd) {
             let lang = Self::from_command(&interpreter);
             if lang != Self::Unknown {
                 return (lang, DetectionConfidence::CommandPrefix);
+            }
+        }
+
+        // Priority 1b: Check pipe destinations (e.g. "cat <<EOF | python")
+        // This handles cases where the heredoc consumer is later in the pipeline
+        if cmd.contains('|') {
+            for segment in cmd.split('|') {
+                let segment = segment.trim();
+                if segment.is_empty() {
+                    continue;
+                }
+                if let Some(interpreter) = Self::extract_head_interpreter(segment) {
+                    let lang = Self::from_command(&interpreter);
+                    if lang != Self::Unknown {
+                        return (lang, DetectionConfidence::CommandPrefix);
+                    }
+                }
             }
         }
 
@@ -441,7 +456,7 @@ impl ScriptLanguage {
         (Self::Unknown, DetectionConfidence::Unknown)
     }
 
-    /// Extract the interpreter name from a command string.
+    /// Extract the interpreter name from the head of a command string.
     ///
     /// Handles various formats:
     /// - `python3 -c "code"` → "python3"
@@ -449,7 +464,7 @@ impl ScriptLanguage {
     /// - `env python3 -c "code"` → "python3"
     /// - `env -S python3 -c "code"` → "python3" (skips env flags)
     /// - `bash -c "code"` → "bash"
-    fn extract_interpreter(cmd: &str) -> Option<String> {
+    fn extract_head_interpreter(cmd: &str) -> Option<String> {
         let mut parts = cmd.split_whitespace();
         let first = parts.next()?;
 
@@ -883,7 +898,7 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
     }
 }
 
-/// Extract inline scripts from -c/-e/-p flags.
+/// Extract inline scripts from -c/-e flags.
 fn extract_inline_scripts(
     command: &str,
     limits: &ExtractionLimits,
@@ -1160,7 +1175,22 @@ fn extract_heredoc_body(
         // Check if this line is the terminator
         let trimmed = match heredoc_type {
             HeredocType::TabStripped => line.trim_start_matches('\t'),
-            HeredocType::IndentStripped => line.trim_start(),
+            HeredocType::IndentStripped => {
+                // Find minimum indentation across non-empty lines
+                let min_indent = body_lines
+                    .iter()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| l.len() - l.trim_start().len())
+                    .min()
+                    .unwrap_or(0);
+
+                // Strip that minimum indentation from the current line
+                if line.len() >= min_indent {
+                    &line[min_indent..]
+                } else {
+                    line.trim_start()
+                }
+            }
             HeredocType::Standard | HeredocType::HereString => line,
         };
 
@@ -1265,7 +1295,7 @@ pub struct ExtractedShellCommand {
 ///
 /// # What does NOT get extracted (false positive avoidance)
 ///
-/// - Comments: `# rm -rf /` is NOT executed
+/// - Comments: `# rm -rf / dangerous` is NOT executed
 /// - String literals in echo/printf: content inside quotes is data, not execution
 /// - Heredoc delimiters themselves
 ///
@@ -1322,8 +1352,8 @@ pub fn extract_shell_commands(content: &str) -> Vec<ExtractedShellCommand> {
 ///
 /// Walks the tree looking for "command" nodes (simple commands in bash).
 /// Recurses into all child nodes to find nested commands, including:
-/// - Command substitutions: `$(...)`
-/// - Subshells: `(...)`
+/// - Command substitutions: `$(cmd)`
+/// - Subshells: `(cmd)`
 /// - Pipelines, command lists, loops, conditionals, etc.
 #[allow(clippy::needless_pass_by_value)]
 fn collect_commands_recursive<D: ast_grep_core::Doc>(
@@ -1369,6 +1399,7 @@ fn collect_commands_recursive<D: ast_grep_core::Doc>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use proptest::prelude::*;
 
     // ========================================================================
@@ -1460,7 +1491,7 @@ mod tests {
                 "perl5.38.2 -E 'say 1'",
                 // Node versions
                 "node18 -e 'console.log(1)'",
-                "node20.1 -p 'process.version'",
+                "node20.1 -e 'console.log(1)'",
                 "nodejs18 -e 'console.log(1)'",
                 "nodejs20.10.0 -e 'test'",
             ];
@@ -2384,7 +2415,8 @@ mod tests {
                     assert!(
                         reasons
                             .iter()
-                            .any(|r| matches!(r, SkipReason::UnterminatedHeredoc { .. }))
+                            .any(|r| matches!(r, SkipReason::UnterminatedHeredoc { .. })),
+                        "should report UnterminatedHeredoc, not ExceededSizeLimit"
                     );
                 }
                 _ => panic!("Expected Skipped result for unterminated heredoc"),
@@ -2679,7 +2711,7 @@ echo "done""#;
 
         #[test]
         fn heredoc_delimiter_is_not_command() {
-            // The EOF itself is not a command, and heredoc BODY content is DATA not commands
+            // The EOF itself is not a command, and heredoc body content is DATA not commands
             let script = r"cat << EOF
 some content
 rm -rf / mentioned in text
@@ -2823,5 +2855,14 @@ fi"#;
                 }
             }
         }
+    }
+
+    #[test]
+    fn detects_language_in_pipeline() {
+        // Regression test: now detects python in pipeline via pipe scanning
+        let cmd = "cat <<EOF | python";
+        let content = "print('hello')"; // ambiguous content
+        let (lang, _) = ScriptLanguage::detect(cmd, content);
+        assert_eq!(lang, ScriptLanguage::Python);
     }
 }

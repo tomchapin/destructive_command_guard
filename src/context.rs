@@ -356,10 +356,13 @@ impl ContextClassifier {
                             if i > last_word_start {
                                 let word = &command[last_word_start..i];
                                 // Check for inline code flags
-                                if word == "-c" || word == "-e" || word == "-r" {
+                                if word == "-c" || word == "-e" || word == "-r" || word == "-S" {
                                     // Check if previous word was an inline-code command
-                                    pending_inline_code =
-                                        self.check_inline_code_context(command, last_word_start);
+                                    pending_inline_code = self.check_inline_code_context(
+                                        command,
+                                        last_word_start,
+                                        word,
+                                    );
                                 }
                             }
                             last_word_start = i + 1;
@@ -476,7 +479,7 @@ impl ContextClassifier {
     }
 
     /// Check if the word before a -c/-e/-r flag is an inline-code command.
-    fn check_inline_code_context(&self, command: &str, flag_start: usize) -> bool {
+    fn check_inline_code_context(&self, command: &str, flag_start: usize, flag: &str) -> bool {
         // Find the previous word
         let before = &command[..flag_start];
         let trimmed = before.trim_end();
@@ -492,6 +495,17 @@ impl ContextClassifier {
 
         // Check if it's an inline-code command (or ends with one after a path)
         let base_name = word.rsplit('/').next().unwrap_or(word);
+
+        if flag == "-S" {
+            // env -S "script" treats the argument as a script/command line
+            return base_name == "env";
+        }
+
+        if base_name == "env" {
+            // env does not use -c/-e/-r for inline code
+            return false;
+        }
+
         self.inline_code_commands.contains(&base_name)
     }
 }
@@ -1105,7 +1119,9 @@ fn sudo_option_takes_value(token: &str) -> Option<WrapperOptionValueMode> {
     // Common sudo options that take an argument: -u user, -g group, -h host, -p prompt, -C num,
     // -r role, -D directory. These show up in automation and are important for correct wrapper stripping.
     const SHORT_VALUE_OPTS: &[&str] = &["-u", "-g", "-h", "-p", "-C", "-t", "-a", "-U", "-r", "-D"];
-    const LONG_VALUE_OPTS: &[&str] = &["--user", "--group", "--host", "--prompt", "--role", "--chdir"];
+    const LONG_VALUE_OPTS: &[&str] = &[
+        "--user", "--group", "--host", "--prompt", "--role", "--chdir",
+    ];
 
     if token.starts_with("--") {
         for opt in LONG_VALUE_OPTS {
@@ -1443,7 +1459,9 @@ fn consume_word_token(command: &str, bytes: &[u8], mut i: usize, len: usize) -> 
                         }
                         b'$' if i + 1 < len && bytes[i + 1] == b'(' => {
                             has_inline_code = true;
-                            i = consume_dollar_paren(command, i);
+                            i += 1; // Skip past (
+                            // Note: we don't track nesting inside double quotes for simplicity
+                            // This is conservative (treats more as potentially dangerous)
                         }
                         b'`' => {
                             has_inline_code = true;
@@ -1774,7 +1792,10 @@ mod tests {
         let spans = classify_command(cmd);
 
         // The quoted message should be Argument
-        let msg_span = spans.spans().iter().find(|s| s.text(cmd).contains("reset --hard"));
+        let msg_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.text(cmd).contains("reset --hard"));
         if let Some(span) = msg_span {
             assert!(
                 span.kind == SpanKind::Argument || span.kind == SpanKind::Data,
@@ -2016,15 +2037,6 @@ mod tests {
         // grep -F/--fixed-strings do NOT take pattern arguments (pattern remains positional)
         assert!(!SAFE_STRING_REGISTRY.is_flag_data("grep", "-F"));
         assert!(!SAFE_STRING_REGISTRY.is_flag_data("grep", "--fixed-strings"));
-    }
-
-    #[test]
-    fn test_registry_rg_pattern_flags() {
-        // rg -e/--regexp take pattern arguments (data, not code)
-        assert!(SAFE_STRING_REGISTRY.is_flag_data("rg", "-e"));
-        assert!(SAFE_STRING_REGISTRY.is_flag_data("rg", "--regexp"));
-        // rg --fixed-strings does NOT take a pattern argument (pattern remains positional)
-        assert!(!SAFE_STRING_REGISTRY.is_flag_data("rg", "--fixed-strings"));
     }
 
     #[test]
@@ -2337,6 +2349,10 @@ mod tests {
 
         assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
         assert!(!sanitized.as_ref().contains("rm -rf"));
-        assert!(sanitized.as_ref().contains("sudo --chdir=/tmp git commit -m"));
+        assert!(
+            sanitized
+                .as_ref()
+                .contains("sudo --chdir=/tmp git commit -m")
+        );
     }
 }

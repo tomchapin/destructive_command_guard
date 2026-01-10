@@ -39,8 +39,8 @@ mod pack_test_template {
     //! 1. Place tests in the same file as the pack, or
     //! 2. Create a separate `<pack>_tests.rs` file
 
-    use crate::packs::test_helpers::*;
     use crate::packs::Severity;
+    use crate::packs::test_helpers::*;
     // Import your pack module here:
     // use crate::packs::your_category::your_pack;
 
@@ -59,11 +59,20 @@ mod pack_test_template {
         // Verify pack metadata
         assert!(!pack.id.is_empty(), "Pack should have an ID");
         assert!(!pack.name.is_empty(), "Pack should have a name");
-        assert!(!pack.description.is_empty(), "Pack should have a description");
-        assert!(!pack.keywords.is_empty(), "Pack should have keywords for quick-reject");
+        assert!(
+            !pack.description.is_empty(),
+            "Pack should have a description"
+        );
+        assert!(
+            !pack.keywords.is_empty(),
+            "Pack should have keywords for quick-reject"
+        );
 
         // Verify patterns exist
-        assert!(!pack.destructive_patterns.is_empty(), "Pack should have destructive patterns");
+        assert!(
+            !pack.destructive_patterns.is_empty(),
+            "Pack should have destructive patterns"
+        );
         // Note: safe_patterns may be empty for some packs
 
         // Verify patterns compile and have required fields
@@ -79,7 +88,9 @@ mod pack_test_template {
 
         // Pack IDs should be lowercase, dot-separated
         assert!(
-            pack.id.chars().all(|c| c.is_ascii_lowercase() || c == '.' || c == '_'),
+            pack.id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c == '.' || c == '_'),
             "Pack ID '{}' should be lowercase with dots/underscores only",
             pack.id
         );
@@ -110,7 +121,11 @@ mod pack_test_template {
         // With various refs
         assert_blocks(&pack, "git reset --hard HEAD", "destroys uncommitted");
         assert_blocks(&pack, "git reset --hard HEAD~1", "destroys uncommitted");
-        assert_blocks(&pack, "git reset --hard origin/main", "destroys uncommitted");
+        assert_blocks(
+            &pack,
+            "git reset --hard origin/main",
+            "destroys uncommitted",
+        );
         assert_blocks(&pack, "git reset --hard abc123", "destroys uncommitted");
     }
 
@@ -137,8 +152,16 @@ mod pack_test_template {
 
         // Long flag
         assert_blocks(&pack, "git push --force", "destroy remote history");
-        assert_blocks(&pack, "git push origin main --force", "destroy remote history");
-        assert_blocks(&pack, "git push --force origin main", "destroy remote history");
+        assert_blocks(
+            &pack,
+            "git push origin main --force",
+            "destroy remote history",
+        );
+        assert_blocks(
+            &pack,
+            "git push --force origin main",
+            "destroy remote history",
+        );
 
         // Short flag
         assert_blocks(&pack, "git push -f", "destroy remote history");
@@ -226,8 +249,16 @@ mod pack_test_template {
         let pack = example_pack::create_pack();
 
         // Paths with special characters
-        assert_blocks(&pack, "git push --force origin feature/my-branch", "destroy remote");
-        assert_blocks(&pack, "git push --force origin bugfix/issue#123", "destroy remote");
+        assert_blocks(
+            &pack,
+            "git push --force origin feature/my-branch",
+            "destroy remote",
+        );
+        assert_blocks(
+            &pack,
+            "git push --force origin bugfix/issue#123",
+            "destroy remote",
+        );
     }
 
     // =========================================================================
@@ -259,10 +290,10 @@ mod pack_test_template {
         assert_allows(&pack, "git diff");
         assert_allows(&pack, "git add .");
         assert_allows(&pack, "git commit -m 'message'");
-        assert_allows(&pack, "git push");  // Without --force
+        assert_allows(&pack, "git push"); // Without --force
         assert_allows(&pack, "git pull");
         assert_allows(&pack, "git fetch");
-        assert_allows(&pack, "git branch -d feature");  // Safe delete with -d
+        assert_allows(&pack, "git branch -d feature"); // Safe delete with -d
     }
 
     /// Test: Substring matches should not trigger (keyword boundary)

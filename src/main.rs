@@ -34,11 +34,12 @@ use fancy_regex::Regex;
 #[cfg(test)]
 use memchr::memmem;
 // Import HookInput for parsing stdin JSON in hook mode
+#[cfg(test)]
 use destructive_command_guard::hook::HookInput;
 #[cfg(test)]
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal};
 #[cfg(test)]
 use std::sync::LazyLock;
 
@@ -288,7 +289,7 @@ static DESTRUCTIVE_PATTERNS: LazyLock<Vec<DestructivePattern>> = LazyLock::new(|
     ]
 });
 
-/// Pre-compiled finders for quick rejection (SIMD-accelerated).
+/// Pre-compiled finders for quick rejection (SIMD-accelerated substring search).
 /// Only used in tests - production code uses `pack_aware_quick_reject` from packs module.
 #[cfg(test)]
 static GIT_FINDER: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new("git"));
@@ -458,51 +459,22 @@ fn main() {
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
 
-    // Read stdin with size limit to prevent DoS from pathological inputs.
-    // Hook input is typically ~100-200 bytes of JSON.
-    // Use take() to enforce size limit (reads up to limit+1 to detect overflow).
+    // Read and parse input
     let max_input_bytes = config.general.max_hook_input_bytes();
-    let mut input = String::with_capacity(256);
-    {
-        let mut limited = io::stdin().lock().take(max_input_bytes as u64 + 1);
-        if limited.read_to_string(&mut input).is_err() {
+    let hook_input = match hook::read_hook_input(max_input_bytes) {
+        Ok(input) => input,
+        Err(hook::HookReadError::InputTooLarge(len)) => {
+            eprintln!(
+                "[dcg] Warning: stdin input ({} bytes) exceeds limit ({} bytes); allowing command (fail-open)",
+                len, max_input_bytes
+            );
             return;
         }
-    }
-
-    // Check if input exceeded the limit (fail-open: allow and warn)
-    if input.len() > max_input_bytes {
-        eprintln!(
-            "[dcg] Warning: stdin input ({} bytes) exceeds limit ({} bytes); allowing command (fail-open)",
-            input.len(),
-            max_input_bytes
-        );
-        return;
-    }
-
-    // Start evaluation deadline after input size checks (includes JSON parse + evaluation).
-    let deadline = Deadline::new(HOOK_EVALUATION_BUDGET);
-
-    // Fast path: parse JSON directly from the input buffer
-    let Ok(hook_input) = serde_json::from_str::<HookInput>(&input) else {
-        return;
+        Err(_) => return, // Fail open on IO or JSON errors
     };
 
-    if deadline.is_exceeded() {
-        if let (Some(log_file), Some(command)) = (
-            config.general.log_file.as_deref(),
-            hook::extract_command(&hook_input),
-        ) {
-            let _ = hook::log_budget_skip(
-                log_file,
-                &command,
-                "input_parsing",
-                deadline.elapsed(),
-                HOOK_EVALUATION_BUDGET,
-            );
-        }
-        return;
-    }
+    // Start evaluation deadline after input size checks (includes evaluation).
+    let deadline = Deadline::new(HOOK_EVALUATION_BUDGET);
 
     // Only process Bash tool invocations
     if hook_input.tool_name.as_deref() != Some("Bash") {

@@ -139,7 +139,7 @@ fn strip_sudo(command: &str) -> Option<(String, StrippedWrapper)> {
     const SIMPLE_FLAGS: &[char] = &['E', 'H', 'n', 'k', 'K', 'S', 's', 'b', 'i', 'P', 'A', 'B'];
     // Options that take an argument
     // -D (chdir) changes to directory before running command
-    const ARG_FLAGS: &[char] = &['u', 'g', 'h', 'p', 'C', 'r', 'U', 'D'];
+    const ARG_FLAGS: &[char] = &['u', 'g', 'h', 'p', 'C', 'r', 'U', 'D', 't', 'a', 'T'];
 
     let trimmed = command.trim_start();
     if !trimmed.starts_with("sudo") {
@@ -249,9 +249,7 @@ fn strip_sudo(command: &str) -> Option<(String, StrippedWrapper)> {
                 return None;
             }
             // Skip argument token
-            while idx < bytes.len() && !bytes[idx].is_ascii_whitespace() {
-                idx += 1;
-            }
+            idx = consume_word_token(bytes, idx, bytes.len());
         }
     }
 
@@ -345,9 +343,7 @@ fn strip_env(command: &str) -> Option<(String, StrippedWrapper)> {
                     while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
                         idx += 1;
                     }
-                    while idx < bytes.len() && !bytes[idx].is_ascii_whitespace() {
-                        idx += 1;
-                    }
+                    idx = consume_word_token(bytes, idx, bytes.len());
                     continue;
                 }
                 _ => {
@@ -504,6 +500,61 @@ fn strip_command_wrapper(command: &str) -> Option<(String, StrippedWrapper)> {
     ))
 }
 
+#[must_use]
+fn consume_word_token(bytes: &[u8], mut i: usize, len: usize) -> usize {
+    while i < len {
+        let b = bytes[i];
+
+        if b.is_ascii_whitespace() {
+            break;
+        }
+
+        if matches!(b, b'|' | b';' | b'&' | b'(' | b')') {
+            break;
+        }
+
+        match b {
+            b'\\' => {
+                // Skip escaped byte.
+                i = (i + 2).min(len);
+            }
+            b'\'' => {
+                // Single-quoted segment
+                i += 1;
+                while i < len && bytes[i] != b'\'' {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
+            }
+            b'"' => {
+                // Double-quoted segment
+                i += 1;
+                while i < len {
+                    match bytes[i] {
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        b'\\' => {
+                            i = (i + 2).min(len);
+                        }
+                        _ => {
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    i
+}
+
 /// Strip leading backslash from the first command token.
 ///
 /// This handles bash alias bypass: `\git` instead of `git`.
@@ -634,6 +685,19 @@ mod tests {
     }
 
     #[test]
+    fn test_env_split_string_fails_gracefully() {
+        // env -S treats the argument as a script/command line.
+        // We don't currently parse the -S argument to extract the command,
+        // so we fail to strip the wrapper. This is safe because the original
+        // command string ("git ...") remains and matches patterns.
+        let result = strip_wrapper_prefixes("env -S \"git reset --hard\"");
+
+        // Should NOT be normalized (fail open to original string)
+        assert!(!result.was_normalized());
+        assert_eq!(result.original, "env -S \"git reset --hard\"");
+    }
+
+    #[test]
     fn test_empty_command() {
         let result = strip_wrapper_prefixes("");
         assert!(!result.was_normalized());
@@ -671,6 +735,13 @@ mod tests {
     fn test_sudo_with_chdir() {
         // -D changes directory before running command
         let result = strip_wrapper_prefixes("sudo -D /tmp git reset --hard");
+        assert_eq!(result.normalized, "git reset --hard");
+    }
+
+    #[test]
+    fn test_sudo_with_type() {
+        // -t changes SELinux type
+        let result = strip_wrapper_prefixes("sudo -t unconfined_t git reset --hard");
         assert_eq!(result.normalized, "git reset --hard");
     }
 

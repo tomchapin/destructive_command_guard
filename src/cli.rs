@@ -2321,7 +2321,12 @@ fn run_corpus(
         category: std::collections::HashMap::new(),
     };
 
-    let categories = ["true_positives", "false_positives", "bypass_attempts", "edge_cases"];
+    let categories = [
+        "true_positives",
+        "false_positives",
+        "bypass_attempts",
+        "edge_cases",
+    ];
 
     for category_name in categories {
         // Apply category filter if specified
@@ -2441,7 +2446,12 @@ fn run_single_corpus_test(
     let mut effective_config = config.clone();
     if let Some(ref rule_id) = case.rule_id {
         if let Some((pack_id, _)) = rule_id.split_once(':') {
-            if !pack_id.starts_with("core") && !effective_config.packs.enabled.contains(&pack_id.to_string()) {
+            if !pack_id.starts_with("core")
+                && !effective_config
+                    .packs
+                    .enabled
+                    .contains(&pack_id.to_string())
+            {
                 effective_config.packs.enabled.push(pack_id.to_string());
             }
         }
@@ -2635,7 +2645,8 @@ fn format_corpus_pretty(output: &CorpusOutput) -> String {
     let colorize = colored::control::SHOULD_COLORIZE.should_colorize();
 
     // Header
-    let _ = writeln!(result,
+    let _ = writeln!(
+        result,
         "{}\n",
         if colorize {
             "dcg corpus".green().bold().to_string()
@@ -2649,7 +2660,8 @@ fn format_corpus_pretty(output: &CorpusOutput) -> String {
     let _ = writeln!(result, "Generated: {}\n", output.generated_at);
 
     // Summary
-    let _ = writeln!(result,
+    let _ = writeln!(
+        result,
         "{}",
         if colorize {
             "=== Summary ===".blue().bold().to_string()
@@ -2658,7 +2670,8 @@ fn format_corpus_pretty(output: &CorpusOutput) -> String {
         }
     );
 
-    let _ = writeln!(result,
+    let _ = writeln!(
+        result,
         "Total: {} ({} passed, {} failed)\n",
         output.total_cases, output.total_passed, output.total_failed
     );
@@ -2678,7 +2691,8 @@ fn format_corpus_pretty(output: &CorpusOutput) -> String {
         } else {
             status.to_string()
         };
-        let _ = writeln!(result,
+        let _ = writeln!(
+            result,
             "  {}: {}/{} [{}]",
             cat, stats.passed, stats.total, status_str
         );
@@ -2706,7 +2720,8 @@ fn format_corpus_pretty(output: &CorpusOutput) -> String {
     // Failed tests
     let failures: Vec<_> = output.cases.iter().filter(|c| !c.passed).collect();
     if !failures.is_empty() {
-        let _ = writeln!(result,
+        let _ = writeln!(
+            result,
             "{}",
             if colorize {
                 "=== Failures ===".red().bold().to_string()
@@ -2716,7 +2731,8 @@ fn format_corpus_pretty(output: &CorpusOutput) -> String {
         );
 
         for case in failures {
-            let _ = writeln!(result,
+            let _ = writeln!(
+                result,
                 "  {} - {}",
                 if colorize {
                     "FAIL".red().to_string()
@@ -2727,7 +2743,8 @@ fn format_corpus_pretty(output: &CorpusOutput) -> String {
             );
             let _ = writeln!(result, "    ID: {}", case.id);
             let _ = writeln!(result, "    Command: {}", case.command);
-            let _ = writeln!(result,
+            let _ = writeln!(
+                result,
                 "    Expected: {}, Actual: {}",
                 case.expected, case.actual
             );
@@ -3604,10 +3621,7 @@ fn validate_config_diagnostics() -> ConfigDiagnostics {
 
     // Explicit config path override (highest precedence for doctor diagnostics)
     if let Ok(value) = std::env::var(crate::config::ENV_CONFIG_PATH) {
-        let Some(path) = crate::config::resolve_config_path_value(
-            &value,
-            cwd.as_deref(),
-        ) else {
+        let Some(path) = crate::config::resolve_config_path_value(&value, cwd.as_deref()) else {
             diag.parse_error = Some("DCG_CONFIG is set but empty".to_string());
             return diag;
         };
@@ -4567,7 +4581,11 @@ mod tests {
         let changed = install_dcg_hook_into_settings(&mut settings, false).expect("install ok");
         assert!(!changed, "should detect existing hook");
 
-        let pre = settings.get("hooks").and_then(|h| h.get("PreToolUse")).and_then(|arr| arr.as_array()).unwrap();
+        let pre = settings
+            .get("hooks")
+            .and_then(|h| h.get("PreToolUse"))
+            .and_then(|arr| arr.as_array())
+            .unwrap();
         assert_eq!(pre.iter().filter(|e| is_dcg_hook_entry(e)).count(), 1);
     }
 
@@ -4901,7 +4919,10 @@ mod tests {
 
         // Verify it exists
         let doc_before = load_or_create_allowlist_doc(&path).unwrap();
-        assert!(has_rule_entry(&doc_before, &rule), "should have existing rule");
+        assert!(
+            has_rule_entry(&doc_before, &rule),
+            "should have existing rule"
+        );
 
         // Remove it
         let mut doc_to_modify = load_or_create_allowlist_doc(&path).unwrap();
@@ -4911,7 +4932,10 @@ mod tests {
 
         // Verify it's gone
         let doc_after = load_or_create_allowlist_doc(&path).unwrap();
-        assert!(!has_rule_entry(&doc_after, &rule), "should not have existing rule");
+        assert!(
+            !has_rule_entry(&doc_after, &rule),
+            "should not have existing rule"
+        );
     }
 
     #[test]
@@ -5054,8 +5078,8 @@ mod tests {
 
     #[test]
     fn test_cli_parse_scan_format_json() {
-        let cli = Cli::try_parse_from(["dcg", "scan", "--staged", "--format", "json"])
-            .expect("parse");
+        let cli =
+            Cli::try_parse_from(["dcg", "scan", "--staged", "--format", "json"]).expect("parse");
         if let Some(Command::Scan(scan)) = cli.command {
             assert_eq!(scan.format, Some(crate::scan::ScanFormat::Json));
         } else {

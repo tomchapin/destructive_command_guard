@@ -142,8 +142,8 @@ mod tests {
     //! infrastructure. See `docs/pack-testing-guide.md` for details.
 
     use super::*;
-    use crate::packs::test_helpers::*;
     use crate::packs::Severity;
+    use crate::packs::test_helpers::*;
 
     // =========================================================================
     // Pack Creation Tests
@@ -176,7 +176,11 @@ mod tests {
         assert_blocks_with_pattern(&pack, "git reset --hard", "reset-hard");
         assert_blocks(&pack, "git reset --hard HEAD", "destroys uncommitted");
         assert_blocks(&pack, "git reset --hard HEAD~1", "destroys uncommitted");
-        assert_blocks(&pack, "git reset --hard origin/main", "destroys uncommitted");
+        assert_blocks(
+            &pack,
+            "git reset --hard origin/main",
+            "destroys uncommitted",
+        );
     }
 
     #[test]
@@ -195,8 +199,16 @@ mod tests {
 
         assert_blocks_with_severity(&pack, "git push --force", Severity::Critical);
         assert_blocks_with_severity(&pack, "git push -f", Severity::Critical);
-        assert_blocks(&pack, "git push origin main --force", "destroy remote history");
-        assert_blocks(&pack, "git push --force origin main", "destroy remote history");
+        assert_blocks(
+            &pack,
+            "git push origin main --force",
+            "destroy remote history",
+        );
+        assert_blocks(
+            &pack,
+            "git push --force origin main",
+            "destroy remote history",
+        );
     }
 
     #[test]
@@ -225,7 +237,11 @@ mod tests {
         let pack = create_pack();
 
         assert_blocks_with_severity(&pack, "git restore file.txt", Severity::High);
-        assert_blocks(&pack, "git restore --worktree file.txt", "discards uncommitted");
+        assert_blocks(
+            &pack,
+            "git restore --worktree file.txt",
+            "discards uncommitted",
+        );
     }
 
     #[test]
@@ -290,23 +306,26 @@ mod tests {
     fn test_specificity_safe_git_commands() {
         let pack = create_pack();
 
-        test_batch_allows(&pack, &[
-            "git status",
-            "git log",
-            "git log --oneline",
-            "git diff",
-            "git diff --cached",
-            "git show HEAD",
-            "git branch",
-            "git branch -a",
-            "git remote -v",
-            "git fetch",
-            "git pull",
-            "git push",  // Without --force
-            "git add .",
-            "git commit -m 'message'",
-            "git branch -d feature",  // Safe delete with -d
-        ]);
+        test_batch_allows(
+            &pack,
+            &[
+                "git status",
+                "git log",
+                "git log --oneline",
+                "git diff",
+                "git diff --cached",
+                "git show HEAD",
+                "git branch",
+                "git branch -a",
+                "git remote -v",
+                "git fetch",
+                "git pull",
+                "git push", // Without --force
+                "git add .",
+                "git commit -m 'message'",
+                "git branch -d feature", // Safe delete with -d
+            ],
+        );
     }
 
     #[test]
