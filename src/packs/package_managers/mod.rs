@@ -18,7 +18,8 @@ pub fn create_pack() -> Pack {
         description: "Protects against dangerous package manager operations like publishing \
                       packages and removing critical system packages",
         keywords: &[
-            "npm", "yarn", "pnpm", "pip", "apt", "yum", "dnf", "cargo", "gem", "brew", "publish",
+            "npm", "yarn", "pnpm", "pip", "apt", "yum", "dnf", "cargo", "gem", "brew", "poetry",
+            "mvn", "mvnw", "gradle", "gradlew", "publish",
         ],
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
@@ -40,6 +41,9 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         safe_pattern!("yarn-audit", r"yarn\s+audit"),
         // pip list/show are safe
         safe_pattern!("pip-list", r"pip\s+(?:list|show|freeze)\b"),
+        // poetry show/info are safe
+        safe_pattern!("poetry-show", r"poetry\s+show\b"),
+        safe_pattern!("poetry-env-list", r"poetry\s+env\s+list\b"),
         // cargo build/test/check are safe
         safe_pattern!(
             "cargo-safe",
@@ -77,6 +81,12 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
             "npm-unpublish",
             r"npm\s+unpublish\b",
             "npm unpublish removes a published package. This can break dependent projects."
+        ),
+        // pip uninstall
+        destructive_pattern!(
+            "pip-uninstall",
+            r"pip(?:3)?\s+uninstall\b",
+            "pip uninstall removes installed packages. Verify dependencies before removing."
         ),
         // pip install from URL (potential security risk)
         destructive_pattern!(
@@ -126,12 +136,41 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
             r"brew\s+(?:uninstall|remove)\b",
             "brew uninstall removes packages. Verify no dependent packages are affected."
         ),
+        // poetry publish/remove
+        destructive_pattern!(
+            "poetry-publish",
+            r"poetry\s+publish\b(?!.*--dry-run)",
+            "poetry publish releases a package. Use --dry-run first."
+        ),
+        destructive_pattern!(
+            "poetry-remove",
+            r"poetry\s+remove\b",
+            "poetry remove uninstalls a dependency. Verify no critical packages are affected."
+        ),
+        // maven deploy / release
+        destructive_pattern!(
+            "maven-deploy",
+            r"(?:mvn|mvnw)\s+deploy\b",
+            "mvn deploy publishes artifacts to a remote repository. Verify target repository."
+        ),
+        destructive_pattern!(
+            "maven-release-perform",
+            r"(?:mvn|mvnw)\s+.*release:perform\b",
+            "mvn release:perform publishes a release. Verify version and repository."
+        ),
+        // gradle publish / release
+        destructive_pattern!(
+            "gradle-publish",
+            r"(?:gradle|gradlew)\s+.*\bpublish\b",
+            "gradle publish uploads artifacts. Use --dry-run first when possible."
+        ),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packs::test_helpers::assert_blocks;
 
     #[test]
     fn brew_uninstall_is_reachable_via_keywords() {
@@ -144,6 +183,19 @@ mod tests {
             .check("brew uninstall wget")
             .expect("brew uninstall should be blocked by package managers pack");
         assert_eq!(matched.name, Some("brew-uninstall"));
+    }
+
+    #[test]
+    fn poetry_maven_gradle_and_pip_uninstall_block() {
+        let pack = create_pack();
+        assert_blocks(&pack, "poetry publish", "poetry publish");
+        assert_blocks(&pack, "poetry remove requests", "poetry remove");
+        assert_blocks(&pack, "mvn deploy", "mvn deploy");
+        assert_blocks(&pack, "./mvnw release:perform", "release:perform");
+        assert_blocks(&pack, "gradle publish", "gradle publish");
+        assert_blocks(&pack, "./gradlew publish", "gradle publish");
+        assert_blocks(&pack, "pip uninstall boto3", "pip uninstall");
+        assert_blocks(&pack, "pip3 uninstall requests", "pip uninstall");
     }
 
     #[test]
