@@ -75,7 +75,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
     vec![
         destructive_pattern!(
             "os-curl-delete-doc",
-            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:opensearch|:9200)[^\s'\"]*/[a-z0-9][a-z0-9._-]*/_doc/[^\s/?]+"#,
+            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*?(?:opensearch|:9200)[^\s'\"]*?/[a-z0-9][a-z0-9._-]*/_doc/[^\s/?]+"#,
             "curl -X DELETE against /_doc deletes a document from OpenSearch."
         ),
         destructive_pattern!(

@@ -2031,6 +2031,20 @@ mod tests {
     }
 
     #[test]
+    fn test_command_substitution_with_comment() {
+        // Test that parentheses inside comments are ignored
+        let cmd = "echo $(echo # ) \n)";
+        let spans = classify_command(cmd);
+
+        let inline_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
+        assert!(inline_span.is_some());
+        assert_eq!(inline_span.unwrap().text(cmd), "$(echo # ) \n)");
+    }
+
+    #[test]
     fn test_single_quote_preserves_special_chars() {
         let cmd = "echo '$HOME'";
         let spans = classify_command(cmd);
