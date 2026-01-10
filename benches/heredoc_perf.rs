@@ -187,6 +187,8 @@ fn bench_pack_aware_quick_reject(c: &mut Criterion) {
         "system".to_string(),
         "strict_git".to_string(),
         "package_managers".to_string(),
+        "cicd".to_string(),
+        "safe.cleanup".to_string(),
     ];
     let worst_inputs = build_hook_inputs(&worst_case);
 
@@ -257,6 +259,8 @@ fn bench_core_pipeline(c: &mut Criterion) {
         "system".to_string(),
         "strict_git".to_string(),
         "package_managers".to_string(),
+        "cicd".to_string(),
+        "safe.cleanup".to_string(),
     ];
     let worst_inputs = build_hook_inputs(&worst_case);
 
@@ -473,6 +477,8 @@ fn bench_full_pipeline(c: &mut Criterion) {
         "system".to_string(),
         "strict_git".to_string(),
         "package_managers".to_string(),
+        "cicd".to_string(),
+        "safe.cleanup".to_string(),
     ];
     let hook_inputs = build_hook_inputs(&config);
 
