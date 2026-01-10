@@ -4,11 +4,16 @@
 //! including subcommands for configuration management and pack information.
 
 use clap::{Args, Parser, Subcommand};
+use chrono::Utc;
 
 use crate::config::Config;
 use crate::evaluator::{EvaluationDecision, MatchSource, evaluate_command_with_pack_order};
 use crate::load_default_allowlists;
 use crate::packs::REGISTRY;
+use crate::pending_exceptions::{
+    AllowOnceEntry, AllowOnceScopeKind, AllowOnceStore, PendingExceptionRecord,
+    PendingExceptionStore,
+};
 
 /// High-performance Claude Code hook for blocking destructive commands.
 ///
@@ -84,6 +89,10 @@ pub enum Command {
         #[arg(long, conflicts_with = "project")]
         user: bool,
     },
+
+    /// Allow a blocked command once using the short code
+    #[command(name = "allow-once")]
+    AllowOnce(AllowOnceCommand),
 
     /// Install the hook into Claude Code settings
     #[command(name = "install")]
@@ -669,6 +678,46 @@ pub enum AllowlistAction {
     },
 }
 
+/// Allow-once command arguments.
+#[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct AllowOnceCommand {
+    /// Short code printed at the top of a denial message
+    pub code: String,
+
+    /// Automatically confirm (non-interactive)
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+
+    /// Show raw command text in output (default shows redacted)
+    #[arg(long)]
+    pub show_raw: bool,
+
+    /// Dry-run (do not write allow-once entry)
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Output JSON for automation
+    #[arg(long)]
+    pub json: bool,
+
+    /// Allow a single use only (consumed after first allow)
+    #[arg(long)]
+    pub single_use: bool,
+
+    /// Override explicit config blocklist (extra confirmation required)
+    #[arg(long)]
+    pub force: bool,
+
+    /// Select a specific entry when multiple match the code (1-based)
+    #[arg(long, value_name = "N", conflicts_with = "hash")]
+    pub pick: Option<usize>,
+
+    /// Select by full hash when multiple match the code
+    #[arg(long, value_name = "HASH", conflicts_with = "pick")]
+    pub hash: Option<String>,
+}
+
 /// Output format for allowlist list command
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum AllowlistOutputFormat {
@@ -807,6 +856,9 @@ pub fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // Shortcut for `allowlist remove`
             let layer = resolve_layer(project, user);
             allowlist_remove(&rule_id, layer)?;
+        }
+        Some(Command::AllowOnce(cmd)) => {
+            handle_allow_once_command(&config, &cmd)?;
         }
         Some(Command::Scan(scan)) => {
             handle_scan_command(&config, scan)?;
@@ -4068,6 +4120,171 @@ fn handle_allowlist_command(action: AllowlistAction) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+fn handle_allow_once_command(
+    config: &Config,
+    cmd: &AllowOnceCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{self, Write};
+
+    let now = Utc::now();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let pending_path = PendingExceptionStore::default_path(Some(&cwd));
+    let pending_store = PendingExceptionStore::new(pending_path);
+
+    let (matches, _maintenance) = pending_store.lookup_by_code(&cmd.code, now)?;
+    if matches.is_empty() {
+        return Err(format!(
+            "No pending exception found for code '{}'. It may be expired.",
+            cmd.code
+        )
+        .into());
+    }
+
+    let selected = select_pending_entry(&matches, cmd)?;
+
+    let is_config_block = selected.source.as_deref() == Some("ConfigOverride");
+    if is_config_block && !cmd.force {
+        return Err(
+            "This denial came from your config blocklist; re-run with --force to override.".into(),
+        );
+    }
+
+    let (scope_kind, scope_path) = find_repo_root_from_cwd().map_or_else(
+        || (AllowOnceScopeKind::Cwd, cwd.clone()),
+        |root| (AllowOnceScopeKind::Project, root),
+    );
+    let scope_path_str = scope_path.to_string_lossy().to_string();
+
+    let entry = AllowOnceEntry::from_pending(
+        selected,
+        now,
+        scope_kind,
+        &scope_path_str,
+        cmd.single_use,
+        cmd.force && is_config_block,
+        &config.logging.redaction,
+    );
+
+    if cmd.json {
+        let output = serde_json::json!({
+            "status": "ok",
+            "code": cmd.code,
+            "dry_run": cmd.dry_run,
+            "single_use": cmd.single_use,
+            "force": entry.force_allow_config,
+            "scope_kind": format!("{scope_kind:?}").to_lowercase(),
+            "scope_path": scope_path_str,
+            "command": if cmd.show_raw { selected.command_raw.clone() } else { selected.command_redacted.clone() },
+            "cwd": selected.cwd.clone(),
+            "expires_at": entry.expires_at,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        if cmd.dry_run {
+            return Ok(());
+        }
+    } else {
+        let display_command = if cmd.show_raw {
+            selected.command_raw.as_str()
+        } else {
+            selected.command_redacted.as_str()
+        };
+        println!("Allow-once confirmation:");
+        println!("  Command: {display_command}");
+        println!("  CWD: {}", selected.cwd);
+        println!("  Expires: {}", entry.expires_at);
+        println!("  Scope: {scope_kind:?} ({scope_path_str})");
+        if cmd.single_use {
+            println!("  Mode: single-use");
+        } else {
+            println!("  Mode: reusable until expiry");
+        }
+
+        let needs_prompt = !(cmd.yes || cmd.dry_run);
+        if needs_prompt {
+            if cmd.force && is_config_block {
+                print!("Type 'FORCE' to confirm override: ");
+                io::stdout().flush()?;
+                let mut response = String::new();
+                io::stdin().read_line(&mut response)?;
+                if response.trim() != "FORCE" {
+                    return Err("Aborted.".into());
+                }
+            } else {
+                print!("Proceed? [y/N]: ");
+                io::stdout().flush()?;
+                let mut response = String::new();
+                io::stdin().read_line(&mut response)?;
+                let response = response.trim().to_lowercase();
+                if response != "y" && response != "yes" {
+                    return Err("Aborted.".into());
+                }
+            }
+        }
+
+        if cmd.dry_run {
+            println!("Dry-run: no allow-once entry written.");
+            return Ok(());
+        }
+    }
+
+    let allow_once_path = AllowOnceStore::default_path(Some(&cwd));
+    let allow_once_store = AllowOnceStore::new(allow_once_path.clone());
+    let _maintenance = allow_once_store.add_entry(&entry, now)?;
+
+    if !cmd.json {
+        println!("✓ Allow-once entry created");
+        println!("  File: {}", allow_once_path.display());
+    }
+
+    Ok(())
+}
+
+fn select_pending_entry<'a>(
+    matches: &'a [PendingExceptionRecord],
+    cmd: &AllowOnceCommand,
+) -> Result<&'a PendingExceptionRecord, Box<dyn std::error::Error>> {
+    if matches.len() == 1 {
+        return Ok(&matches[0]);
+    }
+
+    if let Some(hash) = cmd.hash.as_deref() {
+        let record = matches
+            .iter()
+            .find(|record| record.full_hash == hash)
+            .ok_or_else(|| format!("No pending entry with hash '{hash}'"))?;
+        return Ok(record);
+    }
+
+    if let Some(pick) = cmd.pick {
+        if pick == 0 || pick > matches.len() {
+            return Err(format!("Pick must be between 1 and {}", matches.len()).into());
+        }
+        return Ok(&matches[pick - 1]);
+    }
+
+    print_pending_choices(matches, cmd.show_raw);
+    Err("Multiple pending entries share this code; use --pick or --hash.".into())
+}
+
+fn print_pending_choices(matches: &[PendingExceptionRecord], show_raw: bool) {
+    println!("Multiple pending entries match this code:");
+    for (idx, record) in matches.iter().enumerate() {
+        let display_command = if show_raw {
+            record.command_raw.as_str()
+        } else {
+            record.command_redacted.as_str()
+        };
+        println!(
+            "  {}. [{}] {} (cwd: {}, created: {})",
+            idx + 1,
+            &record.full_hash[..8.min(record.full_hash.len())],
+            display_command,
+            record.cwd,
+            record.created_at
+        );
+    }
+}
+
 /// Add a rule to the allowlist.
 fn allowlist_add_rule(
     rule_id: &str,
@@ -5478,6 +5695,29 @@ mod tests {
             assert_eq!(reason, "Release workflow");
         } else {
             panic!("Expected Allowlist AddCommand command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_allow_once() {
+        let cli = Cli::parse_from([
+            "dcg",
+            "allow-once",
+            "ab12",
+            "--single-use",
+            "--dry-run",
+            "--yes",
+            "--pick",
+            "2",
+        ]);
+        if let Some(Command::AllowOnce(cmd)) = cli.command {
+            assert_eq!(cmd.code, "ab12");
+            assert!(cmd.single_use);
+            assert!(cmd.dry_run);
+            assert!(cmd.yes);
+            assert_eq!(cmd.pick, Some(2));
+        } else {
+            panic!("Expected AllowOnce command");
         }
     }
 

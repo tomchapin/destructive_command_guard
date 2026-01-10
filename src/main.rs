@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Destructive Command Guard (dcg) for Claude Code.
 //!
 //! Blocks destructive commands that can lose uncommitted work or delete files.
@@ -306,31 +307,30 @@ fn main() {
 
     match mode {
         DecisionMode::Deny => {
-            if matches!(info.source, MatchSource::Pack | MatchSource::HeredocAst) {
-                let cwd_path = std::env::current_dir().ok();
-                let cwd_display = cwd_path
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "<unknown>".to_string());
-                let store_path = PendingExceptionStore::default_path(cwd_path.as_deref());
-                let store = PendingExceptionStore::new(store_path);
-                let reason = match (pack, pattern) {
-                    (Some(pack_id), Some(pattern_name)) => {
-                        format!("{pack_id}:{pattern_name} - {}", info.reason)
-                    }
-                    _ => info.reason.clone(),
-                };
+            let cwd_path = std::env::current_dir().ok();
+            let cwd_display = cwd_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let store_path = PendingExceptionStore::default_path(cwd_path.as_deref());
+            let store = PendingExceptionStore::new(store_path);
+            let reason = match (pack, pattern) {
+                (Some(pack_id), Some(pattern_name)) => {
+                    format!("{pack_id}:{pattern_name} - {}", info.reason)
+                }
+                _ => info.reason.clone(),
+            };
 
-                if let Ok((_record, maintenance)) = store.record_block(
-                    &command,
-                    &cwd_display,
-                    &reason,
-                    &config.logging.redaction,
-                    false,
-                ) {
-                    if let Some(log_file) = config.general.log_file.as_deref() {
-                        let _ = log_maintenance(log_file, maintenance, "record_block");
-                    }
+            if let Ok((_record, maintenance)) = store.record_block(
+                &command,
+                &cwd_display,
+                &reason,
+                &config.logging.redaction,
+                false,
+                Some(format!("{:?}", info.source)),
+            ) {
+                if let Some(log_file) = config.general.log_file.as_deref() {
+                    let _ = log_maintenance(log_file, maintenance, "record_block");
                 }
             }
 
@@ -736,10 +736,11 @@ mod tests {
                 keywords.contains(&"docker"),
                 "Enabled keywords should include 'docker' when containers.docker pack is enabled"
             );
-            assert!(
-                keywords.contains(&"prune"),
-                "Enabled keywords should include 'prune' when containers.docker pack is enabled"
-            );
+            // "prune" is NOT a keyword for containers.docker (it would trigger on git prune)
+            // assert!(
+            //    keywords.contains(&"prune"),
+            //    "Enabled keywords should include 'prune' when containers.docker pack is enabled"
+            // );
         }
 
         /// Integration test: full pipeline blocks docker prune with pack enabled.

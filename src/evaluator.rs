@@ -44,6 +44,8 @@
 //! ```
 
 use crate::allowlist::{AllowlistLayer, LayeredAllowlist};
+use crate::pending_exceptions::AllowOnceStore;
+use chrono::Utc;
 use crate::ast_matcher::DEFAULT_MATCHER;
 use crate::config::Config;
 use crate::context::sanitize_for_pattern_matching;
@@ -500,6 +502,15 @@ fn resolve_project_path(
     std::env::current_dir().ok()
 }
 
+fn allow_once_match(command: &str) -> Option<crate::pending_exceptions::AllowOnceEntry> {
+    let cwd = std::env::current_dir().ok()?;
+    let store = AllowOnceStore::new(AllowOnceStore::default_path(Some(&cwd)));
+    match store.match_command(command, &cwd, Utc::now()) {
+        Ok(Some(entry)) => Some(entry),
+        _ => None,
+    }
+}
+
 /// Evaluate a command against all patterns and packs using a deadline.
 ///
 /// When `deadline` is provided and exceeded, evaluation fails open and returns
@@ -581,9 +592,22 @@ pub fn evaluate_command_with_pack_order_at_path(
         return EvaluationResult::allowed();
     }
 
+    // Step 1.5: Check allow-once overrides (may be superseded by config blocklist).
+    let allow_once = allow_once_match(command);
+
     // Step 2: Check precompiled block overrides
     if let Some(reason) = compiled_overrides.check_block(command) {
+        if allow_once
+            .as_ref()
+            .is_some_and(|entry| entry.force_allow_config)
+        {
+            return EvaluationResult::allowed();
+        }
         return EvaluationResult::denied_by_config(reason.to_string());
+    }
+
+    if allow_once.is_some() {
+        return EvaluationResult::allowed();
     }
 
     // Step 3: Heredoc / inline-script detection (Tier 1/2/3, fail-open).
@@ -734,9 +758,22 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
         return EvaluationResult::allowed();
     }
 
+    // Step 1.5: Check allow-once overrides (may be superseded by config blocklist).
+    let allow_once = allow_once_match(command);
+
     // Step 2: Check precompiled block overrides
     if let Some(reason) = compiled_overrides.check_block(command) {
+        if allow_once
+            .as_ref()
+            .is_some_and(|entry| entry.force_allow_config)
+        {
+            return EvaluationResult::allowed();
+        }
         return EvaluationResult::denied_by_config(reason.to_string());
+    }
+
+    if allow_once.is_some() {
+        return EvaluationResult::allowed();
     }
 
     if deadline_exceeded(deadline) {
@@ -982,9 +1019,22 @@ where
         return EvaluationResult::allowed();
     }
 
+    // Step 1.5: Check allow-once overrides (may be superseded by config blocklist).
+    let allow_once = allow_once_match(command);
+
     // Step 2: Check precompiled block overrides
     if let Some(reason) = compiled_overrides.check_block(command) {
+        if allow_once
+            .as_ref()
+            .is_some_and(|entry| entry.force_allow_config)
+        {
+            return EvaluationResult::allowed();
+        }
         return EvaluationResult::denied_by_config(reason.to_string());
+    }
+
+    if allow_once.is_some() {
+        return EvaluationResult::allowed();
     }
 
     // Step 3: Heredoc / inline-script detection (Tier 1/2/3, fail-open).

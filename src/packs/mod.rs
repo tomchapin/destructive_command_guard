@@ -36,7 +36,7 @@ use regex_engine::LazyFancyRegex;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 /// Unique identifier for a pack (e.g., "core", "database.postgresql").
 pub type PackId = String;
@@ -388,29 +388,114 @@ impl CheckResult {
     }
 }
 
+/// Static pack metadata for lazy initialization.
+///
+/// This allows the registry to access pack IDs and keywords without
+/// instantiating the full pack (avoiding pattern vector allocations).
+pub struct PackEntry {
+    /// Pack ID (e.g., "core.git", "database.postgresql").
+    pub id: &'static str,
+    /// Keywords for quick-reject filtering.
+    pub keywords: &'static [&'static str],
+    /// Function to build the full pack (called lazily).
+    builder: fn() -> Pack,
+    /// Cached pack instance (built on first access).
+    instance: OnceLock<Pack>,
+}
+
+impl PackEntry {
+    /// Create a new pack entry with metadata and lazy builder.
+    pub const fn new(
+        id: &'static str,
+        keywords: &'static [&'static str],
+        builder: fn() -> Pack,
+    ) -> Self {
+        Self {
+            id,
+            keywords,
+            builder,
+            instance: OnceLock::new(),
+        }
+    }
+
+    /// Get or build the pack instance.
+    pub fn get_pack(&self) -> &Pack {
+        self.instance.get_or_init(|| {
+            let mut pack = (self.builder)();
+            // Build Aho-Corasick automaton for keyword matching
+            if !pack.keywords.is_empty() && pack.keyword_matcher.is_none() {
+                pack.keyword_matcher = Some(
+                    aho_corasick::AhoCorasick::new(pack.keywords)
+                        .expect("pack keywords should be valid patterns"),
+                );
+            }
+            pack
+        })
+    }
+
+    /// Check if the pack has been built yet.
+    #[cfg(test)]
+    pub fn is_built(&self) -> bool {
+        self.instance.get().is_some()
+    }
+}
+
 /// Registry of all available packs.
 pub struct PackRegistry {
-    /// All registered packs, keyed by ID.
-    packs: HashMap<PackId, Pack>,
+    /// All registered pack entries (metadata + lazy instances).
+    entries: Vec<&'static PackEntry>,
 
     /// Pack IDs organized by category for hierarchical enablement.
-    categories: HashMap<String, Vec<PackId>>,
+    categories: HashMap<String, Vec<&'static str>>,
+
+    /// Index for fast pack lookup by ID.
+    index: HashMap<&'static str, usize>,
 }
+
+/// Static pack entries - metadata is available without instantiating packs.
+/// Packs are built lazily on first access.
+static PACK_ENTRIES: [PackEntry; 26] = [
+    PackEntry::new("core.git", &["git"], core::git::create_pack),
+    PackEntry::new("core.filesystem", &["rm", "/rm"], core::filesystem::create_pack),
+    PackEntry::new("cicd.github_actions", &["gh"], cicd::github_actions::create_pack),
+    PackEntry::new("database.postgresql", &["psql", "dropdb", "createdb", "pg_dump", "pg_restore", "DROP", "TRUNCATE", "DELETE"], database::postgresql::create_pack),
+    PackEntry::new("database.mysql", &["mysql", "mysqldump", "DROP", "TRUNCATE", "DELETE"], database::mysql::create_pack),
+    PackEntry::new("database.mongodb", &["mongo", "mongosh", "mongodump", "mongorestore", "dropDatabase", "dropCollection"], database::mongodb::create_pack),
+    PackEntry::new("database.redis", &["redis-cli", "FLUSHALL", "FLUSHDB", "DEBUG"], database::redis::create_pack),
+    PackEntry::new("database.sqlite", &["sqlite3", "DROP", "DELETE", "TRUNCATE"], database::sqlite::create_pack),
+    PackEntry::new("containers.docker", &["docker"], containers::docker::create_pack),
+    PackEntry::new("containers.compose", &["docker-compose", "docker compose"], containers::compose::create_pack),
+    PackEntry::new("containers.podman", &["podman"], containers::podman::create_pack),
+    PackEntry::new("kubernetes.kubectl", &["kubectl"], kubernetes::kubectl::create_pack),
+    PackEntry::new("kubernetes.helm", &["helm"], kubernetes::helm::create_pack),
+    PackEntry::new("kubernetes.kustomize", &["kustomize"], kubernetes::kustomize::create_pack),
+    PackEntry::new("cloud.aws", &["aws"], cloud::aws::create_pack),
+    PackEntry::new("cloud.gcp", &["gcloud", "gsutil", "bq"], cloud::gcp::create_pack),
+    PackEntry::new("cloud.azure", &["az"], cloud::azure::create_pack),
+    PackEntry::new("infrastructure.terraform", &["terraform", "tofu"], infrastructure::terraform::create_pack),
+    PackEntry::new("infrastructure.ansible", &["ansible", "ansible-playbook"], infrastructure::ansible::create_pack),
+    PackEntry::new("infrastructure.pulumi", &["pulumi"], infrastructure::pulumi::create_pack),
+    PackEntry::new("system.disk", &["dd", "mkfs", "fdisk", "parted", "wipefs"], system::disk::create_pack),
+    PackEntry::new("system.permissions", &["chmod", "chown", "setfacl"], system::permissions::create_pack),
+    PackEntry::new("system.services", &["systemctl", "service"], system::services::create_pack),
+    PackEntry::new("strict_git", &["git"], strict_git::create_pack),
+    PackEntry::new("package_managers", &["npm", "yarn", "pnpm", "pip", "cargo", "gem", "composer", "go"], package_managers::create_pack),
+    PackEntry::new("safe.cleanup", &["rm", "/rm"], safe::cleanup::create_pack),
+];
 
 impl PackRegistry {
     /// Collect all keywords from enabled packs.
     ///
-    /// This returns a deduplicated list of keywords that can be used for
-    /// pack-aware quick rejection. If a command contains none of these keywords,
-    /// it can safely skip pack checking.
+    /// This is a **metadata-only** operation - does not instantiate packs.
+    /// Keywords are accessed from static PackEntry metadata.
     #[must_use]
     pub fn collect_enabled_keywords(&self, enabled_packs: &HashSet<String>) -> Vec<&'static str> {
         let expanded = self.expand_enabled(enabled_packs);
         let mut keywords = Vec::new();
 
         for pack_id in &expanded {
-            if let Some(pack) = self.packs.get(pack_id) {
-                keywords.extend(pack.keywords.iter().copied());
+            if let Some(&idx) = self.index.get(pack_id.as_str()) {
+                keywords.extend(self.entries[idx].keywords.iter().copied());
             }
         }
 
@@ -422,82 +507,52 @@ impl PackRegistry {
     }
 
     /// Create a new registry with all built-in packs.
+    ///
+    /// This is a **metadata-only** operation. Packs are not instantiated
+    /// until they are accessed via `get()`.
     #[must_use]
     pub fn new() -> Self {
-        let mut registry = Self {
-            packs: HashMap::new(),
-            categories: HashMap::new(),
-        };
+        let mut categories: HashMap<String, Vec<&'static str>> = HashMap::new();
+        let mut index: HashMap<&'static str, usize> = HashMap::new();
 
-        // Register all built-in packs
-        registry.register_pack(core::git::create_pack());
-        registry.register_pack(core::filesystem::create_pack());
-        registry.register_pack(cicd::github_actions::create_pack());
-        registry.register_pack(database::postgresql::create_pack());
-        registry.register_pack(database::mysql::create_pack());
-        registry.register_pack(database::mongodb::create_pack());
-        registry.register_pack(database::redis::create_pack());
-        registry.register_pack(database::sqlite::create_pack());
-        registry.register_pack(containers::docker::create_pack());
-        registry.register_pack(containers::compose::create_pack());
-        registry.register_pack(containers::podman::create_pack());
-        registry.register_pack(kubernetes::kubectl::create_pack());
-        registry.register_pack(kubernetes::helm::create_pack());
-        registry.register_pack(kubernetes::kustomize::create_pack());
-        registry.register_pack(cloud::aws::create_pack());
-        registry.register_pack(cloud::gcp::create_pack());
-        registry.register_pack(cloud::azure::create_pack());
-        registry.register_pack(infrastructure::terraform::create_pack());
-        registry.register_pack(infrastructure::ansible::create_pack());
-        registry.register_pack(infrastructure::pulumi::create_pack());
-        registry.register_pack(system::disk::create_pack());
-        registry.register_pack(system::permissions::create_pack());
-        registry.register_pack(system::services::create_pack());
-        registry.register_pack(strict_git::create_pack());
-        registry.register_pack(package_managers::create_pack());
-        registry.register_pack(safe::cleanup::create_pack());
-
-        registry
-    }
-
-    /// Register a pack in the registry.
-    ///
-    /// Builds the Aho-Corasick automaton for keyword matching during registration.
-    fn register_pack(&mut self, mut pack: Pack) {
-        let id = pack.id.clone();
-
-        // Build Aho-Corasick automaton for O(n) keyword matching.
-        // This is done once at registration time, not per-command.
-        if !pack.keywords.is_empty() && pack.keyword_matcher.is_none() {
-            pack.keyword_matcher = Some(
-                aho_corasick::AhoCorasick::new(pack.keywords)
-                    .expect("pack keywords should be valid patterns"),
-            );
+        // Build categories and index from static entries
+        for (i, entry) in PACK_ENTRIES.iter().enumerate() {
+            // Extract category from ID (e.g., "database" from "database.postgresql")
+            let category = entry.id.split('.').next().unwrap_or(entry.id);
+            categories
+                .entry(category.to_string())
+                .or_default()
+                .push(entry.id);
+            index.insert(entry.id, i);
         }
 
-        // Extract category from ID (e.g., "database" from "database.postgresql")
-        let category = id.split('.').next().unwrap_or(&id).to_string();
+        Self {
+            entries: PACK_ENTRIES.iter().collect(),
+            categories,
+            index,
+        }
+    }
 
-        // Add to categories map
-        self.categories
-            .entry(category)
-            .or_default()
-            .push(id.clone());
-
-        // Add to packs map
-        self.packs.insert(id, pack);
+    /// Get the number of registered packs.
+    #[must_use]
+    pub fn pack_count(&self) -> usize {
+        self.entries.len()
     }
 
     /// Get a pack by ID.
+    ///
+    /// This instantiates the pack lazily on first access.
     #[must_use]
     pub fn get(&self, id: &str) -> Option<&Pack> {
-        self.packs.get(id)
+        self.index.get(id).map(|&idx| self.entries[idx].get_pack())
     }
 
     /// Get all pack IDs.
+    ///
+    /// This is a **metadata-only** operation - does not instantiate packs.
     #[must_use]
-    pub fn all_pack_ids(&self) -> Vec<&PackId> {
-        self.packs.keys().collect()
+    pub fn all_pack_ids(&self) -> Vec<&'static str> {
+        self.entries.iter().map(|e| e.id).collect()
     }
 
     /// Get all categories.
@@ -507,15 +562,19 @@ impl PackRegistry {
     }
 
     /// Get pack IDs in a category.
+    ///
+    /// This is a **metadata-only** operation - does not instantiate packs.
     #[must_use]
-    pub fn packs_in_category(&self, category: &str) -> Vec<&PackId> {
+    pub fn packs_in_category(&self, category: &str) -> Vec<&'static str> {
         self.categories
             .get(category)
-            .map(|ids| ids.iter().collect())
+            .map(|ids| ids.clone())
             .unwrap_or_default()
     }
 
     /// Expand enabled pack IDs to include sub-packs when a category is enabled.
+    ///
+    /// This is a **metadata-only** operation - does not instantiate packs.
     #[must_use]
     pub fn expand_enabled(&self, enabled: &HashSet<String>) -> HashSet<String> {
         let mut expanded = HashSet::new();
@@ -524,8 +583,8 @@ impl PackRegistry {
             // Check if this is a category
             if let Some(sub_packs) = self.categories.get(id) {
                 // Add all sub-packs in the category
-                for sub_pack in sub_packs {
-                    expanded.insert(sub_pack.clone());
+                for &sub_pack in sub_packs {
+                    expanded.insert(sub_pack.to_string());
                 }
             }
             // Also add the ID itself (in case it's a specific pack)
@@ -559,7 +618,7 @@ impl PackRegistry {
         // Filter to only include pack IDs that actually exist in registry
         let mut pack_ids: Vec<String> = expanded
             .into_iter()
-            .filter(|id| self.packs.contains_key(id))
+            .filter(|id| self.index.contains_key(id.as_str()))
             .collect();
 
         // Sort by tier then lexicographically within tier
@@ -625,7 +684,7 @@ impl PackRegistry {
         // If any pack's safe pattern matches, allow the command immediately.
         // This enables "safe" packs to whitelist commands across pack boundaries.
         for pack_id in &ordered_packs {
-            if let Some(pack) = self.packs.get(pack_id) {
+            if let Some(pack) = self.get(pack_id) {
                 // Quick reject: skip packs that don't have keyword matches
                 if !pack.might_match(cmd) {
                     continue;
@@ -640,7 +699,7 @@ impl PackRegistry {
         // Pass 2: Check destructive patterns across all enabled packs.
         // The first matching destructive pattern determines the result.
         for pack_id in &ordered_packs {
-            if let Some(pack) = self.packs.get(pack_id) {
+            if let Some(pack) = self.get(pack_id) {
                 // Quick reject: skip packs that don't have keyword matches
                 if !pack.might_match(cmd) {
                     continue;
@@ -661,26 +720,38 @@ impl PackRegistry {
     }
 
     /// List all packs with their status.
+    ///
+    /// Note: This instantiates packs to get pattern counts. For metadata-only
+    /// listing (e.g., just IDs and enabled status), use `all_pack_ids()` instead.
     #[must_use]
     pub fn list_packs(&self, enabled: &HashSet<String>) -> Vec<PackInfo> {
         let expanded = self.expand_enabled(enabled);
 
         let mut infos: Vec<_> = self
-            .packs
-            .values()
-            .map(|pack| PackInfo {
-                id: pack.id.clone(),
-                name: pack.name,
-                description: pack.description,
-                enabled: expanded.contains(&pack.id),
-                safe_pattern_count: pack.safe_patterns.len(),
-                destructive_pattern_count: pack.destructive_patterns.len(),
+            .entries
+            .iter()
+            .map(|entry| {
+                let pack = entry.get_pack();
+                PackInfo {
+                    id: pack.id.clone(),
+                    name: pack.name,
+                    description: pack.description,
+                    enabled: expanded.contains(&pack.id),
+                    safe_pattern_count: pack.safe_patterns.len(),
+                    destructive_pattern_count: pack.destructive_patterns.len(),
+                }
             })
             .collect();
 
         // Sort by ID for consistent output
         infos.sort_by(|a, b| a.id.cmp(&b.id));
         infos
+    }
+
+    /// Get a pack entry by ID (metadata only, no pack instantiation).
+    #[must_use]
+    pub fn get_entry(&self, id: &str) -> Option<&PackEntry> {
+        self.index.get(id).map(|&idx| self.entries[idx])
     }
 }
 
@@ -1752,7 +1823,6 @@ mod tests {
     #[test]
     fn destructive_match_contains_metadata() {
         let docker_pack = REGISTRY
-            .packs
             .get("containers.docker")
             .expect("docker pack exists");
 
@@ -1897,7 +1967,6 @@ mod tests {
     #[test]
     fn destructive_match_includes_severity() {
         let docker_pack = REGISTRY
-            .packs
             .get("containers.docker")
             .expect("docker pack exists");
 

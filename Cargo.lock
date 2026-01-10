@@ -604,6 +604,7 @@ dependencies = [
  "dirs",
  "fancy-regex",
  "fs2",
+ "libc",
  "memchr",
  "once_cell",
  "predicates",

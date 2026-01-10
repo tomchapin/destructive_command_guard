@@ -816,3 +816,30 @@ UNBLOCKED:
 Ready to continue with 64dc.6 or other high-priority tasks.
 
 - opus-build (Opus 4.5)
+
+---
+
+[2026-01-10T08:15:00-05:00] From: opus-build | Subject: Claiming 64dc.6 - PackRegistry metadata-only refactor
+
+Claiming git_safety_guard-64dc.6 (PackRegistry metadata-only, no eager pack instantiation).
+
+This is P0 and unblocks 64dc.7 (hook fast path), which unblocks 64dc.4 (zero-compile test).
+
+All dependencies satisfied:
+- 64dc.1 (design) - closed
+- 64dc.5 (lazy regex) - closed (I completed this earlier)
+- ksk.1.2 (golden isomorphism) - closed
+- ksk.1.4 (E2E harness) - closed
+
+Scope per design doc:
+1. Define PackSpec with static metadata (id, name, keywords, pattern specs)
+2. PackRegistry stores &'static PackSpec references only
+3. Packs instantiated on-demand, not eagerly
+4. dcg packs --enabled runs without regex compilation
+5. Hook allow fast path uses metadata only
+
+Isomorphism: Pack ordering, attribution, and decisions must be identical.
+
+Working in: src/packs/mod.rs, src/evaluator.rs, src/cli.rs
+
+- opus-build (Opus 4.5)

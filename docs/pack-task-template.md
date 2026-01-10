@@ -76,4 +76,5 @@ Implement pattern matching for ToolName CLI operations.
 
 ## Validation
 Use [CHECKLIST] Pack Implementation Completion Validation (git_safety_guard-ltou)
-when signing off pack work.
+when signing off pack work. The canonical checklist lives in
+`docs/pack-implementation-checklist.md`.

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Destructive Command Guard (dcg) library.
 //!
 //! This library provides the core functionality for blocking destructive commands
@@ -91,7 +92,10 @@ pub use evaluator::{
 };
 pub use hook::{HookInput, HookOutput, HookResult, HookSpecificOutput};
 pub use packs::{Pack, PackId, PackRegistry};
-pub use pending_exceptions::{PendingExceptionRecord, PendingExceptionStore};
+pub use pending_exceptions::{
+    AllowOnceEntry, AllowOnceScopeKind, AllowOnceStore, PendingExceptionRecord,
+    PendingExceptionStore,
+};
 
 // Re-export dual regex engine abstraction (from regex safety audit)
 pub use packs::regex_engine::{CompiledRegex, needs_backtracking_engine};

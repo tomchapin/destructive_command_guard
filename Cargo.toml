@@ -63,6 +63,7 @@ predicates = "3.1"
 tempfile = "3.14"
 proptest = "1.4"
 criterion = { version = "0.5", features = ["html_reports"] }
+libc = "0.2"
 
 [[bench]]
 name = "heredoc_perf"
@@ -79,7 +80,7 @@ strip = true        # Remove debug symbols
 opt-level = 1       # Faster compile times during development
 
 [lints.rust]
-unsafe_code = "forbid"
+# unsafe_code = "forbid" # Moved to src/lib.rs and src/main.rs to allow unsafe in tests
 
 [lints.clippy]
 all = "warn"

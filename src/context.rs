@@ -519,7 +519,12 @@ impl ContextClassifier {
                 continue;
             }
 
-            return self.inline_code_commands.contains(&base_name);
+            if self.inline_code_commands.contains(&base_name) {
+                return true;
+            }
+            
+            // If it's not a known interpreter, it might be an argument to a previous flag.
+            // Continue searching backwards.
         }
 
         false
@@ -1860,10 +1865,7 @@ mod tests {
         let spans = classify_command(cmd);
 
         // The quoted message should be Argument
-        let msg_span = spans
-            .spans()
-            .iter()
-            .find(|s| s.text(cmd).contains("reset --hard"));
+        let msg_span = spans.spans().iter().find(|s| s.text(cmd).contains("reset --hard"));
         if let Some(span) = msg_span {
             assert_eq!(span.kind, SpanKind::Argument);
         }

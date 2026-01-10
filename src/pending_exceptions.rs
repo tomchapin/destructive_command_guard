@@ -20,10 +20,21 @@ use crate::logging::{RedactionConfig, redact_command};
 
 /// Environment override for pending exceptions file path.
 pub const ENV_PENDING_EXCEPTIONS_PATH: &str = "DCG_PENDING_EXCEPTIONS_PATH";
+/// Environment override for allow-once entries file path.
+pub const ENV_ALLOW_ONCE_PATH: &str = "DCG_ALLOW_ONCE_PATH";
 
 const PENDING_EXCEPTIONS_FILE: &str = "pending_exceptions.jsonl";
+const ALLOW_ONCE_FILE: &str = "allow_once.jsonl";
 const SCHEMA_VERSION: u32 = 1;
 const EXPIRY_HOURS: i64 = 24;
+
+/// Scope kind for allow-once entries.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowOnceScopeKind {
+    Cwd,
+    Project,
+}
 
 /// A stored pending exception record (JSONL line).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +50,74 @@ pub struct PendingExceptionRecord {
     pub reason: String,
     pub single_use: bool,
     pub consumed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// A stored allow-once entry (JSONL line).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AllowOnceEntry {
+    pub schema_version: u32,
+    pub source_short_code: String,
+    pub source_full_hash: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub scope_kind: AllowOnceScopeKind,
+    pub scope_path: String,
+    pub command_raw: String,
+    pub command_redacted: String,
+    pub reason: String,
+    #[serde(default)]
+    pub single_use: bool,
+    pub consumed_at: Option<String>,
+    #[serde(default)]
+    pub force_allow_config: bool,
+}
+
+impl AllowOnceEntry {
+    #[must_use]
+    pub fn from_pending(
+        pending: &PendingExceptionRecord,
+        now: DateTime<Utc>,
+        scope_kind: AllowOnceScopeKind,
+        scope_path: &str,
+        single_use: bool,
+        force_allow_config: bool,
+        redaction: &RedactionConfig,
+    ) -> Self {
+        let created_at = format_timestamp(now);
+        let expires_at = format_timestamp(now + Duration::hours(EXPIRY_HOURS));
+
+        Self {
+            schema_version: SCHEMA_VERSION,
+            source_short_code: pending.short_code.clone(),
+            source_full_hash: pending.full_hash.clone(),
+            created_at,
+            expires_at,
+            scope_kind,
+            scope_path: scope_path.to_string(),
+            command_raw: pending.command_raw.clone(),
+            command_redacted: redact_for_pending(&pending.command_raw, redaction),
+            reason: pending.reason.clone(),
+            single_use,
+            consumed_at: None,
+            force_allow_config,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_consumed(&self) -> bool {
+        self.consumed_at.is_some()
+    }
+
+    #[must_use]
+    pub fn matches_scope(&self, cwd: &Path) -> bool {
+        let scope_path = Path::new(&self.scope_path);
+        match self.scope_kind {
+            AllowOnceScopeKind::Cwd => cwd == scope_path,
+            AllowOnceScopeKind::Project => cwd.starts_with(scope_path),
+        }
+    }
 }
 
 impl PendingExceptionRecord {
@@ -50,6 +129,7 @@ impl PendingExceptionRecord {
         reason: &str,
         redaction: &RedactionConfig,
         single_use: bool,
+        source: Option<String>,
     ) -> Self {
         let created_at = format_timestamp(timestamp);
         let expires_at = format_timestamp(timestamp + Duration::hours(EXPIRY_HOURS));
@@ -69,6 +149,7 @@ impl PendingExceptionRecord {
             reason: reason.to_string(),
             single_use,
             consumed_at: None,
+            source,
         }
     }
 
@@ -139,9 +220,11 @@ impl PendingExceptionStore {
         reason: &str,
         redaction: &RedactionConfig,
         single_use: bool,
+        source: Option<String>,
     ) -> io::Result<(PendingExceptionRecord, PendingMaintenance)> {
         let now = Utc::now();
-        let record = PendingExceptionRecord::new(now, cwd, command, reason, redaction, single_use);
+        let record =
+            PendingExceptionRecord::new(now, cwd, command, reason, redaction, single_use, source);
 
         let mut file = open_locked(&self.path)?;
         let (active, maintenance) = load_active_from_file(&mut file, now);
@@ -190,6 +273,102 @@ impl PendingExceptionStore {
             .filter(|record| record.short_code == code)
             .collect();
         Ok((matches, maintenance))
+    }
+}
+
+/// Allow-once entry store wrapper.
+#[derive(Debug, Clone)]
+pub struct AllowOnceStore {
+    path: PathBuf,
+}
+
+impl AllowOnceStore {
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Resolve the default path (env override or ~/.config/dcg/..).
+    #[must_use]
+    pub fn default_path(cwd: Option<&Path>) -> PathBuf {
+        if let Ok(value) = env::var(ENV_ALLOW_ONCE_PATH) {
+            if let Some(path) = resolve_config_path_value(&value, cwd) {
+                return path;
+            }
+        }
+
+        let base = dirs::config_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"));
+        base.join("dcg").join(ALLOW_ONCE_FILE)
+    }
+
+    /// Append a new allow-once entry and prune expired/consumed entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O errors encountered while opening, locking, or writing the store file.
+    pub fn add_entry(
+        &self,
+        entry: &AllowOnceEntry,
+        now: DateTime<Utc>,
+    ) -> io::Result<PendingMaintenance> {
+        let mut file = open_locked(&self.path)?;
+        let (active, maintenance) = load_allow_once_from_file(&mut file, now);
+
+        if maintenance.pruned_expired > 0 || maintenance.pruned_consumed > 0 {
+            rewrite_allow_once_records(&mut file, &active)?;
+        }
+
+        append_allow_once_record(&mut file, entry)?;
+        Ok(maintenance)
+    }
+
+    /// Match a command against active allow-once entries.
+    ///
+    /// If a single-use entry matches, it is consumed immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O errors encountered while opening, locking, or writing the store file.
+    pub fn match_command(
+        &self,
+        command: &str,
+        cwd: &Path,
+        now: DateTime<Utc>,
+    ) -> io::Result<Option<AllowOnceEntry>> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+
+        let mut file = open_locked(&self.path)?;
+        let (mut active, maintenance) = load_allow_once_from_file(&mut file, now);
+
+        if maintenance.pruned_expired > 0 || maintenance.pruned_consumed > 0 {
+            rewrite_allow_once_records(&mut file, &active)?;
+        }
+
+        let idx = active
+            .iter()
+            .position(|entry| entry.command_raw == command && entry.matches_scope(cwd));
+
+        let Some(idx) = idx else {
+            return Ok(None);
+        };
+
+        let mut selected = active[idx].clone();
+        if active[idx].single_use {
+            selected.consumed_at = Some(format_timestamp(now));
+            active.remove(idx);
+            rewrite_allow_once_records(&mut file, &active)?;
+        }
+
+        Ok(Some(selected))
     }
 }
 
@@ -288,6 +467,50 @@ fn load_active_from_file(
     (active, maintenance)
 }
 
+fn load_allow_once_from_file(
+    file: &mut File,
+    now: DateTime<Utc>,
+) -> (Vec<AllowOnceEntry>, PendingMaintenance) {
+    let mut maintenance = PendingMaintenance::default();
+    let mut active: Vec<AllowOnceEntry> = Vec::new();
+
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        maintenance.parse_errors += 1;
+        return (active, maintenance);
+    }
+    let reader = BufReader::new(file);
+
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            maintenance.parse_errors += 1;
+            continue;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Ok(record) = serde_json::from_str::<AllowOnceEntry>(trimmed) else {
+            maintenance.parse_errors += 1;
+            continue;
+        };
+
+        if record.is_consumed() {
+            maintenance.pruned_consumed += 1;
+            continue;
+        }
+
+        if is_expired(&record.expires_at, now) {
+            maintenance.pruned_expired += 1;
+            continue;
+        }
+
+        active.push(record);
+    }
+
+    (active, maintenance)
+}
+
 fn rewrite_records(file: &mut File, records: &[PendingExceptionRecord]) -> io::Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
@@ -300,7 +523,28 @@ fn rewrite_records(file: &mut File, records: &[PendingExceptionRecord]) -> io::R
     Ok(())
 }
 
+fn rewrite_allow_once_records(file: &mut File, records: &[AllowOnceEntry]) -> io::Result<()> {
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    for record in records {
+        let line = serde_json::to_string(record).map_err(io::Error::other)?;
+        file.write_all(line.as_bytes())?;
+        file.write_all(b"\n")?;
+    }
+    file.sync_data()?;
+    Ok(())
+}
+
 fn append_record(file: &mut File, record: &PendingExceptionRecord) -> io::Result<()> {
+    file.seek(SeekFrom::End(0))?;
+    let line = serde_json::to_string(record).map_err(io::Error::other)?;
+    file.write_all(line.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_data()?;
+    Ok(())
+}
+
+fn append_allow_once_record(file: &mut File, record: &AllowOnceEntry) -> io::Result<()> {
     file.seek(SeekFrom::End(0))?;
     let line = serde_json::to_string(record).map_err(io::Error::other)?;
     file.write_all(line.as_bytes())?;
@@ -379,6 +623,7 @@ mod tests {
             "blocked",
             &redaction_config(),
             false,
+            None,
         );
         assert_eq!(record.short_code.len(), 4);
         assert_eq!(record.full_hash.len(), 64);
@@ -393,7 +638,7 @@ mod tests {
         let redaction = redaction_config();
 
         let mut active =
-            PendingExceptionRecord::new(now, "/repo", "git status", "ok", &redaction, false);
+            PendingExceptionRecord::new(now, "/repo", "git status", "ok", &redaction, false, None);
         active.expires_at = format_timestamp(now + Duration::hours(1));
 
         let mut expired = PendingExceptionRecord::new(
@@ -403,6 +648,7 @@ mod tests {
             "blocked",
             &redaction,
             false,
+            None,
         );
         expired.expires_at = format_timestamp(now - Duration::hours(1));
 
@@ -413,6 +659,7 @@ mod tests {
             "blocked",
             &redaction,
             true,
+            None,
         );
         consumed.consumed_at = Some(format_timestamp(now));
 
@@ -446,6 +693,7 @@ mod tests {
             "ok",
             &redaction_config(),
             false,
+            None,
         );
 
         let contents = format!("not-json\n{}\n", serde_json::to_string(&record).unwrap());
@@ -465,7 +713,7 @@ mod tests {
         let redaction = redaction_config();
 
         let record_a =
-            PendingExceptionRecord::new(now, "/repo", "git status", "ok", &redaction, false);
+            PendingExceptionRecord::new(now, "/repo", "git status", "ok", &redaction, false, None);
         let record_b = PendingExceptionRecord::new(
             now,
             "/repo",
@@ -473,6 +721,7 @@ mod tests {
             "blocked",
             &redaction,
             false,
+            None,
         );
 
         let contents = format!(
@@ -485,5 +734,82 @@ mod tests {
         let (matches, _maintenance) = store.lookup_by_code(&record_a.short_code, now).unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].command_raw, "git status");
+    }
+
+    #[test]
+    fn test_allow_once_consumes_single_use() {
+        let dir = TempDir::new().expect("tempdir");
+        let allow_path = dir.path().join("allow_once.jsonl");
+        let store = AllowOnceStore::new(allow_path);
+        let now = DateTime::parse_from_rfc3339("2026-01-10T06:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let redaction = redaction_config();
+
+        let pending = PendingExceptionRecord::new(
+            now,
+            "/repo",
+            "git status",
+            "ok",
+            &redaction,
+            false,
+            None,
+        );
+
+        let entry = AllowOnceEntry::from_pending(
+            &pending,
+            now,
+            AllowOnceScopeKind::Cwd,
+            "/repo",
+            true,
+            false,
+            &redaction,
+        );
+
+        store.add_entry(&entry, now).unwrap();
+
+        let cwd = Path::new("/repo");
+        let first = store.match_command("git status", cwd, now).unwrap();
+        assert!(first.is_some());
+
+        let second = store.match_command("git status", cwd, now).unwrap();
+        assert!(second.is_none());
+    }
+
+    #[test]
+    fn test_allow_once_project_scope_matches_subdir() {
+        let dir = TempDir::new().expect("tempdir");
+        let allow_path = dir.path().join("allow_once.jsonl");
+        let store = AllowOnceStore::new(allow_path);
+        let now = DateTime::parse_from_rfc3339("2026-01-10T06:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let redaction = redaction_config();
+
+        let pending = PendingExceptionRecord::new(
+            now,
+            "/repo",
+            "git status",
+            "ok",
+            &redaction,
+            false,
+            None,
+        );
+
+        let entry = AllowOnceEntry::from_pending(
+            &pending,
+            now,
+            AllowOnceScopeKind::Project,
+            "/repo",
+            false,
+            false,
+            &redaction,
+        );
+
+        store.add_entry(&entry, now).unwrap();
+
+        let cwd = Path::new("/repo/subdir");
+        let matched = store.match_command("git status", cwd, now).unwrap();
+        assert!(matched.is_some());
     }
 }
