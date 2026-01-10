@@ -1,4 +1,4 @@
-//! HashiCorp Vault CLI pack - protections for destructive Vault operations.
+//! `HashiCorp` Vault CLI pack - protections for destructive Vault operations.
 //!
 //! This pack blocks commands that delete secrets, disable auth/secret engines,
 //! revoke leases/tokens, or remove policies.

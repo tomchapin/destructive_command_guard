@@ -768,8 +768,7 @@ impl PackRegistry {
             "database" => 7,
             "package_managers" => 8,
             "strict_git" => 9,
-            "cicd" => 10, // CI/CD tools (GitHub Actions, etc.)
-            "secrets" => 10,
+            "cicd" | "secrets" => 10, // CI/CD tools (GitHub Actions, etc.)
             _ => 11,      // Unknown categories go last
         }
     }
