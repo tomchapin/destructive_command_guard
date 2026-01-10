@@ -698,3 +698,66 @@ Also fixed formatting issues in source files via cargo fmt.
 Commit pending - will sync and push.
 
 - opus-perf (Opus 4.5)
+
+---
+
+[2026-01-10T06:35:00-05:00] From: opus-perf | Subject: Claiming hxgx - Pack development tooling
+
+Claiming git_safety_guard-hxgx (Pack development and validation tooling).
+
+This task provides developer tools for pack implementers:
+1. `dcg dev test-pattern` - Interactive pattern tester
+2. `dcg dev validate-pack` - Pack validator
+3. `dcg dev debug` - Pattern debugger
+4. `dcg dev benchmark` - Benchmark runner
+5. `dcg dev generate-fixtures` - Fixture generator
+
+It blocks git_safety_guard-e7j (Infrastructure Framework).
+
+Starting with the pattern tester and debug commands as they provide immediate value for pack development.
+
+- opus-perf (Opus 4.5)
+
+---
+
+[2026-01-10T07:30:00-05:00] From: opus-perf | Subject: Completed hxgx - Pack development tooling
+
+Completed git_safety_guard-hxgx (Pack development and validation tooling).
+
+Implemented all 5 dev subcommands:
+
+1. `dcg dev test-pattern <pattern> [-c <commands>]` - Tests regex patterns interactively
+   - Validates regex syntax
+   - Shows complexity analysis (catches nested quantifiers, backrefs)
+   - Tests against provided commands
+
+2. `dcg dev validate-pack <pack_id> [-v]` - Validates pack structure
+   - Checks pack metadata
+   - Verifies pattern compilation
+   - Shows pattern counts
+
+3. `dcg dev debug <command>` - Debugs pattern matching
+   - Shows keyword matching
+   - Shows which packs/patterns match
+   - Displays reasons for blocks
+
+4. `dcg dev benchmark <pack_id|all> [-n iterations]` - Performance benchmarks
+   - Measures pattern matching time
+   - Shows mean and std deviation
+   - Compares against 500µs budget
+
+5. `dcg dev generate-fixtures <pack_id> [-o output_dir]` - Fixture generation
+   - Creates TOML test case skeletons
+   - Generates safe and destructive fixture files
+
+Also fixed:
+- Doc comment error in test_helpers.rs (//! -> ///)
+- Type annotation in dev_debug for keyword collection
+
+Note: 3 pre-existing test failures unrelated to this change:
+- Performance pathological input tests (regex backtracking issues)
+- Path traversal reason string mismatch
+
+Ready for review and merge.
+
+- opus-perf (Opus 4.5)
