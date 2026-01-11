@@ -484,7 +484,7 @@ pub struct PackRegistry {
 
 /// Static pack entries - metadata is available without instantiating packs.
 /// Packs are built lazily on first access.
-static PACK_ENTRIES: [PackEntry; 50] = [
+static PACK_ENTRIES: [PackEntry; 51] = [
     PackEntry::new("core.git", &["git"], core::git::create_pack),
     PackEntry::new(
         "core.filesystem",
@@ -540,6 +540,11 @@ static PACK_ENTRIES: [PackEntry; 50] = [
             "dns-records",
         ],
         dns::cloudflare::create_pack,
+    ),
+    PackEntry::new(
+        "dns.route53",
+        &["aws", "route53"],
+        dns::route53::create_pack,
     ),
     PackEntry::new(
         "monitoring.splunk",
@@ -1868,6 +1873,7 @@ mod tests {
         // Cloud should be tier 4
         assert_eq!(PackRegistry::pack_tier("cloud.aws"), 4);
         assert_eq!(PackRegistry::pack_tier("dns.cloudflare"), 4);
+        assert_eq!(PackRegistry::pack_tier("dns.route53"), 4);
 
         // Kubernetes should be tier 5
         assert_eq!(PackRegistry::pack_tier("kubernetes.kubectl"), 5);

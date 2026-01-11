@@ -766,6 +766,18 @@ test_command_with_packs "wrangler dns-records list --zone-id abc" "allow" "dns.c
 test_command_with_packs "wrangler whoami" "allow" "dns.cloudflare" "wrangler whoami (cloudflare dns pack enabled, safe command)"
 test_command_with_packs "curl -X GET https://api.cloudflare.com/client/v4/zones" "allow" "dns.cloudflare" "curl GET zones (cloudflare dns pack enabled, safe command)"
 
+# Route53 DNS pack tests
+test_command_with_packs "aws route53 delete-hosted-zone --id Z123" "block" "dns.route53" "aws route53 delete-hosted-zone (route53 dns pack enabled)"
+test_command_with_packs "aws route53 change-resource-record-sets --hosted-zone-id Z123 --change-batch '{\"Changes\":[{\"Action\":\"DELETE\"}]}'" "block" "dns.route53" "aws route53 change-resource-record-sets DELETE (route53 dns pack enabled)"
+test_command_with_packs "aws route53 delete-health-check --health-check-id abc" "block" "dns.route53" "aws route53 delete-health-check (route53 dns pack enabled)"
+test_command_with_packs "aws route53 delete-query-logging-config --id abc" "block" "dns.route53" "aws route53 delete-query-logging-config (route53 dns pack enabled)"
+test_command_with_packs "aws route53 delete-traffic-policy --id abc --version 1" "block" "dns.route53" "aws route53 delete-traffic-policy (route53 dns pack enabled)"
+test_command_with_packs "aws route53 delete-reusable-delegation-set --id N123" "block" "dns.route53" "aws route53 delete-reusable-delegation-set (route53 dns pack enabled)"
+test_command_with_packs "aws route53 list-hosted-zones" "allow" "dns.route53" "aws route53 list-hosted-zones (route53 dns pack enabled, safe command)"
+test_command_with_packs "aws route53 list-resource-record-sets --hosted-zone-id Z123" "allow" "dns.route53" "aws route53 list-resource-record-sets (route53 dns pack enabled, safe command)"
+test_command_with_packs "aws route53 get-hosted-zone --id Z123" "allow" "dns.route53" "aws route53 get-hosted-zone (route53 dns pack enabled, safe command)"
+test_command_with_packs "aws route53 test-dns-answer --hosted-zone-id Z123 --record-name example.com" "allow" "dns.route53" "aws route53 test-dns-answer (route53 dns pack enabled, safe command)"
+
 # Multiple packs enabled simultaneously
 test_command_with_packs "docker system prune" "block" "containers.docker,kubernetes.kubectl" "docker system prune (multiple packs enabled)"
 test_command_with_packs "kubectl delete namespace foo" "block" "containers.docker,kubernetes.kubectl" "kubectl delete namespace (multiple packs enabled)"
