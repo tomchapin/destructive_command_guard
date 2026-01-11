@@ -1010,22 +1010,29 @@ pub fn normalize_command_word_token(token: &str) -> Option<String> {
         }
     }
 
-    if let Some((quote, inner)) = out.strip_prefix(['\'', '"']).and_then(|rest| {
-        rest.strip_suffix(['\'', '"'])
-            .map(|inner| (out.as_bytes()[0], inner))
-    }) {
-        // Only unquote when it's clearly a single-token command word (no whitespace/separators).
-        let inner_bytes = inner.as_bytes();
-        let is_safe = !inner_bytes.is_empty()
-            && !inner_bytes.iter().any(u8::is_ascii_whitespace)
-            && !inner_bytes
-                .iter()
-                .any(|b| matches!(b, b'|' | b';' | b'&' | b'(' | b')'))
-            && inner_bytes.first().is_some_and(|b| *b != quote);
+    // Check for matching quotes (both must be same type)
+    let quote = match (out.as_bytes().first(), out.as_bytes().last()) {
+        (Some(b'\''), Some(b'\'')) => Some(b'\''),
+        (Some(b'"'), Some(b'"')) => Some(b'"'),
+        _ => None,
+    };
 
-        if is_safe {
-            out = inner.to_string();
-            changed = true;
+    if let Some(q) = quote {
+        if out.len() >= 2 {
+            let inner = &out[1..out.len() - 1];
+            // Only unquote when it's clearly a single-token command word (no whitespace/separators).
+            let inner_bytes = inner.as_bytes();
+            let is_safe = !inner_bytes.is_empty()
+                && !inner_bytes.iter().any(u8::is_ascii_whitespace)
+                && !inner_bytes
+                    .iter()
+                    .any(|b| matches!(b, b'|' | b';' | b'&' | b'(' | b')'))
+                && inner_bytes.first().is_some_and(|b| *b != q);
+
+            if is_safe {
+                out = inner.to_string();
+                changed = true;
+            }
         }
     }
 
@@ -1063,23 +1070,30 @@ fn normalize_subcommand_token(token: &str) -> Option<String> {
         false
     };
 
-    if let Some((quote, inner)) = out.strip_prefix(['\'', '"']).and_then(|rest| {
-        rest.strip_suffix(['\'', '"'])
-            .map(|inner| (out.as_bytes()[0], inner))
-    }) {
-        // Only unquote when it's clearly a single-token command-ish word (no whitespace/separators).
-        let inner_bytes = inner.as_bytes();
-        let is_safe = !inner_bytes.is_empty()
-            && !inner_bytes.iter().any(u8::is_ascii_whitespace)
-            && !inner_bytes
-                .iter()
-                .any(|b| matches!(b, b'|' | b';' | b'&' | b'(' | b')'))
-            && inner_bytes.first().is_some_and(|b| *b != quote)
-            && looks_like_subcommand_word(inner);
+    // Check for matching quotes (both must be same type)
+    let quote = match (out.as_bytes().first(), out.as_bytes().last()) {
+        (Some(b'\''), Some(b'\'')) => Some(b'\''),
+        (Some(b'"'), Some(b'"')) => Some(b'"'),
+        _ => None,
+    };
 
-        if is_safe {
-            out = inner.to_string();
-            changed = true;
+    if let Some(q) = quote {
+        if out.len() >= 2 {
+            let inner = &out[1..out.len() - 1];
+            // Only unquote when it's clearly a single-token command-ish word (no whitespace/separators).
+            let inner_bytes = inner.as_bytes();
+            let is_safe = !inner_bytes.is_empty()
+                && !inner_bytes.iter().any(u8::is_ascii_whitespace)
+                && !inner_bytes
+                    .iter()
+                    .any(|b| matches!(b, b'|' | b';' | b'&' | b'(' | b')'))
+                && inner_bytes.first().is_some_and(|b| *b != q)
+                && looks_like_subcommand_word(inner);
+
+            if is_safe {
+                out = inner.to_string();
+                changed = true;
+            }
         }
     }
 
@@ -1469,6 +1483,28 @@ mod tests {
         assert_eq!(
             dequote_segment_command_words(r#"git "reset" --hard"#).as_ref(),
             "git reset --hard"
+        );
+    }
+
+    #[test]
+    fn test_mismatched_quotes_not_unquoted() {
+        // Mismatched quotes should NOT be unquoted
+        assert_eq!(
+            normalize_command_word_token(r#""hello'"#),
+            None // No normalization should occur
+        );
+        assert_eq!(
+            normalize_command_word_token(r#"'hello""#),
+            None // No normalization should occur
+        );
+        // But matching quotes should still work
+        assert_eq!(
+            normalize_command_word_token(r#""hello""#),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            normalize_command_word_token("'hello'"),
+            Some("hello".to_string())
         );
     }
 }
