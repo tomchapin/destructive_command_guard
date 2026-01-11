@@ -12,6 +12,7 @@
 //! Enabling a category enables all its sub-packs. Sub-packs can be individually
 //! disabled even if their parent category is enabled.
 
+pub mod apigateway;
 pub mod backup;
 pub mod cdn;
 pub mod cicd;
@@ -532,7 +533,7 @@ impl EnabledKeywordIndex {
 
 /// Static pack entries - metadata is available without instantiating packs.
 /// Packs are built lazily on first access.
-static PACK_ENTRIES: [PackEntry; 68] = [
+static PACK_ENTRIES: [PackEntry; 70] = [
     PackEntry::new("core.git", &["git"], core::git::create_pack),
     PackEntry::new(
         "core.filesystem",
@@ -540,6 +541,11 @@ static PACK_ENTRIES: [PackEntry; 68] = [
         core::filesystem::create_pack,
     ),
     PackEntry::new("storage.s3", &["s3", "s3api"], storage::s3::create_pack),
+    PackEntry::new(
+        "storage.gcs",
+        &["gsutil", "gcloud storage"],
+        storage::gcs::create_pack,
+    ),
     PackEntry::new("remote.rsync", &["rsync"], remote::rsync::create_pack),
     PackEntry::new(
         "remote.ssh",
@@ -845,6 +851,11 @@ static PACK_ENTRIES: [PackEntry; 68] = [
         cdn::cloudfront::create_pack,
     ),
     PackEntry::new(
+        "apigateway.aws",
+        &["aws", "apigateway", "apigatewayv2"],
+        apigateway::aws::create_pack,
+    ),
+    PackEntry::new(
         "infrastructure.terraform",
         &["terraform", "tofu"],
         infrastructure::terraform::create_pack,
@@ -1040,7 +1051,7 @@ impl PackRegistry {
             "core" | "storage" | "remote" => 1,
             "system" => 2,
             "infrastructure" => 3,
-            "cloud" | "dns" | "platform" => 4,
+            "apigateway" | "cloud" | "dns" | "platform" => 4,
             "kubernetes" => 5,
             "containers" => 6,
             "backup" | "database" | "messaging" | "search" => 7,
@@ -1532,8 +1543,9 @@ mod tests {
         // Infrastructure should be tier 3
         assert_eq!(PackRegistry::pack_tier("infrastructure.terraform"), 3);
 
-        // Cloud should be tier 4
+        // Cloud/API Gateway should be tier 4
         assert_eq!(PackRegistry::pack_tier("cloud.aws"), 4);
+        assert_eq!(PackRegistry::pack_tier("apigateway.aws"), 4);
         assert_eq!(PackRegistry::pack_tier("dns.cloudflare"), 4);
         assert_eq!(PackRegistry::pack_tier("dns.route53"), 4);
         assert_eq!(PackRegistry::pack_tier("dns.generic"), 4);
