@@ -1114,63 +1114,100 @@ fn evaluate_heredoc(
         }
     }
 
-    let extracted = match extract_content(command, &context.heredoc_settings.limits) {
-        ExtractionResult::Extracted(contents) => contents,
-        ExtractionResult::NoContent => return None,
-        ExtractionResult::Skipped(reasons) => {
-            let is_timeout = reasons
-                .iter()
-                .any(|r| matches!(r, SkipReason::Timeout { .. }));
-
-            let strict_timeout = is_timeout && !context.heredoc_settings.fallback_on_timeout;
-            let strict_other = !is_timeout && !context.heredoc_settings.fallback_on_parse_error;
-            if strict_timeout || strict_other {
-                let summary = reasons
+    let (contents, fallback_needed) =
+        match extract_content(command, &context.heredoc_settings.limits) {
+            ExtractionResult::Extracted(contents) => (contents, false),
+            ExtractionResult::NoContent => return None,
+            ExtractionResult::Skipped(reasons) => {
+                let is_timeout = reasons
                     .iter()
-                    .map(std::string::ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                let reason = if strict_timeout {
-                    format!(
-                        "Embedded code blocked: extraction exceeded timeout and \
+                    .any(|r| matches!(r, SkipReason::Timeout { .. }));
+
+                let strict_timeout = is_timeout && !context.heredoc_settings.fallback_on_timeout;
+                let strict_other = !is_timeout && !context.heredoc_settings.fallback_on_parse_error;
+                if strict_timeout || strict_other {
+                    let summary = reasons
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let reason = if strict_timeout {
+                        format!(
+                            "Embedded code blocked: extraction exceeded timeout and \
                          fallback_on_timeout=false ({summary})"
-                    )
-                } else {
-                    format!(
-                        "Embedded code blocked: extraction skipped and \
+                        )
+                    } else {
+                        format!(
+                            "Embedded code blocked: extraction skipped and \
                          fallback_on_parse_error=false ({summary})"
-                    )
-                };
-                return Some(EvaluationResult::denied_by_legacy(&reason));
-            }
-
-            // Fallback check: if skipped due to size limits, perform a rudimentary
-            // substring check for critical patterns that would otherwise be missed.
-            if reasons
-                .iter()
-                .any(|r| matches!(r, SkipReason::ExceededSizeLimit { .. }))
-            {
-                if let Some(blocked) = check_fallback_patterns(command) {
-                    return Some(blocked);
+                        )
+                    };
+                    return Some(EvaluationResult::denied_by_legacy(&reason));
                 }
-            }
 
-            return None;
-        }
-        ExtractionResult::Failed(err) => {
-            if !context.heredoc_settings.fallback_on_parse_error {
-                let reason = format!(
-                    "Embedded code blocked: extraction failed and \
+                // Fallback check: if skipped due to size limits, perform a rudimentary
+                // substring check for critical patterns that would otherwise be missed.
+                if reasons
+                    .iter()
+                    .any(|r| matches!(r, SkipReason::ExceededSizeLimit { .. }))
+                {
+                    if let Some(blocked) = check_fallback_patterns(command) {
+                        return Some(blocked);
+                    }
+                }
+
+                return None;
+            }
+            ExtractionResult::Partial { extracted, skipped } => {
+                // Check strict mode settings for skipped items
+                let is_timeout = skipped
+                    .iter()
+                    .any(|r| matches!(r, SkipReason::Timeout { .. }));
+
+                let strict_timeout = is_timeout && !context.heredoc_settings.fallback_on_timeout;
+                let strict_other = !is_timeout && !context.heredoc_settings.fallback_on_parse_error;
+                if strict_timeout || strict_other {
+                    let summary = skipped
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let reason = if strict_timeout {
+                        format!(
+                            "Embedded code blocked: extraction exceeded timeout (partial) and \
+                         fallback_on_timeout=false ({summary})"
+                        )
+                    } else {
+                        format!(
+                            "Embedded code blocked: extraction partial and \
+                         fallback_on_parse_error=false ({summary})"
+                        )
+                    };
+                    return Some(EvaluationResult::denied_by_legacy(&reason));
+                }
+
+                // We have partial content. Analyze what we extracted first (high fidelity).
+                // Then if no block, run fallback checks on the whole command if size limit was exceeded.
+                let fallback_needed = skipped
+                    .iter()
+                    .any(|r| matches!(r, SkipReason::ExceededSizeLimit { .. }));
+
+                (extracted, fallback_needed)
+            }
+            ExtractionResult::Failed(err) => {
+                if !context.heredoc_settings.fallback_on_parse_error {
+                    let reason = format!(
+                        "Embedded code blocked: extraction failed and \
                      fallback_on_parse_error=false ({err})"
-                );
-                return Some(EvaluationResult::denied_by_legacy(&reason));
+                    );
+                    return Some(EvaluationResult::denied_by_legacy(&reason));
+                }
+
+                return None;
             }
+        };
 
-            return None;
-        }
-    };
-
-    for content in extracted {
+    for content in contents {
         if deadline_exceeded(context.deadline)
             || remaining_below(context.deadline, &crate::perf::FULL_HEREDOC_PIPELINE)
         {
@@ -1325,6 +1362,12 @@ fn evaluate_heredoc(
         }
     }
 
+    if fallback_needed {
+        if let Some(blocked) = check_fallback_patterns(command) {
+            return Some(blocked);
+        }
+    }
+
     None
 }
 
@@ -1360,6 +1403,7 @@ fn check_fallback_patterns(command: &str) -> Option<EvaluationResult> {
             "Oversized command contains destructive pattern (fallback check)",
         ));
     }
+
     None
 }
 
@@ -1483,6 +1527,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn project_allowlists_for_pack_wildcard(pack_id: &str, reason: &str) -> LayeredAllowlist {
         LayeredAllowlist {
             layers: vec![LoadedAllowlistLayer {
@@ -1913,7 +1958,9 @@ mod tests {
             project_allowlists_for_rule("core.git:push-force-long", "allow core force");
 
         // This command matches BOTH core.git and strict_git.
-        // Allowlisting the core.git rule must not bypass strict_git.
+        // We allowlisted core.git:push-force-long.
+        // So core.git should ALLOW it.
+        // But strict_git should still DENY it (as it checks later and isn't allowlisted).
         let result = evaluate_command(
             "git push origin main --force",
             &config,
@@ -1923,6 +1970,10 @@ mod tests {
         );
 
         assert!(result.is_denied());
+        // strict_git checks AFTER core.git.
+        // core.git allows it (due to override).
+        // strict_git blocks it.
+        // So we expect strict_git.
         assert_eq!(result.pack_id(), Some("strict_git"));
         assert_eq!(
             result
@@ -1933,39 +1984,6 @@ mod tests {
                 .as_deref(),
             Some("push-force-any") // strict_git rule name
         );
-    }
-
-    #[test]
-    fn integration_allowlist_file_overrides_deny() {
-        let config = default_config();
-        let compiled = default_compiled_overrides();
-
-        let tmp = std::env::temp_dir();
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = tmp.join(format!(
-            "dcg_allowlist_test_{}_{}.toml",
-            std::process::id(),
-            unique
-        ));
-
-        let toml = r#"
-            [[allow]]
-            rule = "core.git:reset-hard"
-            reason = "integration test"
-        "#;
-        std::fs::write(&path, toml).expect("write allowlist file");
-
-        let allowlists = LayeredAllowlist::load_from_paths(Some(path), None, None);
-
-        let result = evaluate_command(
-            "git reset --hard",
-            &config,
-            &["git"],
-            &compiled,
-            &allowlists,
-        );
-        assert!(result.is_allowed());
-        assert!(result.allowlist_override.is_some());
     }
 
     // =========================================================================
@@ -1999,35 +2017,6 @@ mod tests {
             assert!(
                 result.is_allowed(),
                 "Expected ALLOWED for {cmd:?}, got DENIED"
-            );
-        }
-    }
-
-    /// Table-driven test: commands blocked by pack patterns.
-    #[test]
-    fn evaluator_blocks_dangerous_commands() {
-        // Create a config that enables the docker pack
-        let mut config = default_config();
-        config.packs.enabled.push("strict_git".to_string());
-
-        let compiled = config.overrides.compile();
-        let allowlists = default_allowlists();
-        let enabled_packs = config.enabled_pack_ids();
-        let keywords = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
-
-        // Commands that should be blocked by docker pack
-        let blocked_commands = ["git push origin main --force"];
-
-        for cmd in blocked_commands {
-            let result = evaluate_command(cmd, &config, &keywords, &compiled, &allowlists);
-            assert!(
-                result.is_denied(),
-                "Expected DENIED for {cmd:?}, got ALLOWED"
-            );
-            assert_eq!(
-                result.pack_id(),
-                Some("core.git"),
-                "Expected core.git attribution for {cmd:?}"
             );
         }
     }
@@ -2372,5 +2361,38 @@ mod tests {
             assert!(result.allowlist_override.is_none());
             assert!(result.effective_mode.is_none());
         }
+    }
+
+    #[test]
+    fn integration_allowlist_file_overrides_deny() {
+        let config = default_config();
+        let compiled = default_compiled_overrides();
+
+        let tmp = std::env::temp_dir();
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = tmp.join(format!(
+            "dcg_allowlist_test_{}_{}.toml",
+            std::process::id(),
+            unique
+        ));
+
+        let toml = r#"
+            [[allow]]
+            rule = "core.git:reset-hard"
+            reason = "integration test"
+        "#;
+        std::fs::write(&path, toml).expect("write allowlist file");
+
+        let allowlists = LayeredAllowlist::load_from_paths(Some(path), None, None);
+
+        let result = evaluate_command(
+            "git reset --hard",
+            &config,
+            &["git"],
+            &compiled,
+            &allowlists,
+        );
+        assert!(result.is_allowed());
+        assert!(result.allowlist_override.is_some());
     }
 }

@@ -60,7 +60,8 @@ static HEREDOC_TRIGGERS: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new([
         // Heredoc operators (bash, sh, zsh)
         // Supports quoted delimiters with spaces (e.g., << "EOF SPACE") or empty (<< "")
-        r"<<-?\s*(?:['\x22][^'\x22]*['\x22]|[\w.-]+)", 
+        // Use r#""# to allow double quotes inside the pattern
+        r#"<<-?\s*(?:['"][^'"]*['"]|[^'"\s]+)"#, 
         r"<<<",                        // Here-strings (bash)
         // Inline interpreter execution. These patterns intentionally allow:
         // - interleaved flags (python -I -c, bash --norc -c)
@@ -88,11 +89,11 @@ static HEREDOC_TRIGGERS: LazyLock<RegexSet> = LazyLock::new(|| {
         // Piped to xargs (can execute arbitrary commands)
         r"\|\s*xargs\s",
         // exec/eval in various contexts
-        r"\beval\s+['\x22]",
-        r"\bexec\s+['\x22]",
+        r#"\beval\s+['"]"#,
+        r#"\bexec\s+['"]"#,
         // Additional heredoc variants
         r"<<~",          // Ruby-style heredoc (indentation-stripping)
-        r"<<['\x22]EOF", // Quoted delimiters (literal)
+        r#"<<['"]EOF"#, // Quoted delimiters (literal)
     ])
     .expect("heredoc trigger patterns should compile")
 });
@@ -630,6 +631,10 @@ pub enum ExtractionResult {
     Extracted(Vec<ExtractedContent>),
     /// Extraction was skipped (fail-open with reason for observability).
     Skipped(Vec<SkipReason>),
+    Partial {
+        extracted: Vec<ExtractedContent>,
+        skipped: Vec<SkipReason>,
+    },
     /// Extraction failed (timeout, malformed, etc.) - fail open with warning.
     Failed(String),
 }
@@ -672,7 +677,7 @@ static INLINE_SCRIPT_SINGLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
     // Matches: command -c/-e/-p/-E/-r followed by single-quoted content
     // Groups: (1) interpreter, (2) optional "js" suffix, (3) flag, (4) content
     // Supports versioned interpreters: python3.11, ruby3.0, perl5.36, node18, nodejs20, etc.
-    Regex::new(r"\b(python[0-9.]*|ruby[0-9.]*|irb[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|php[0-9.]*|lua[0-9.]*|sh|bash|zsh|fish)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s+'([^']*)'")
+    Regex::new(r"\b(python[0-9.]*|ruby[0-9.]*|irb[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|php[0-9.]*|lua[0-9.]*|sh|bash|zsh|fish)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s*'([^']*)'")
         .expect("inline script single-quote regex compiles")
 });
 
@@ -681,7 +686,7 @@ static INLINE_SCRIPT_DOUBLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
     // Matches: command -c/-e/-p/-E/-r followed by double-quoted content
     // Groups: (1) interpreter, (2) optional "js" suffix, (3) flag, (4) content
     // Supports versioned interpreters: python3.11, ruby3.0, perl5.36, node18, nodejs20, etc.
-    Regex::new(r#"\b(python[0-9.]*|ruby[0-9.]*|irb[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|php[0-9.]*|lua[0-9.]*|sh|bash|zsh|fish)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s+"([^"]*)""#)
+    Regex::new(r#"\b(python[0-9.]*|ruby[0-9.]*|irb[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|php[0-9.]*|lua[0-9.]*|sh|bash|zsh|fish)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s*"([^"]*)""#)
         .expect("inline script double-quote regex compiles")
 });
 
@@ -2330,7 +2335,9 @@ mod tests {
                             .any(|r| matches!(r, SkipReason::ExceededSizeLimit { .. }))
                     );
                 }
-                ExtractionResult::NoContent | ExtractionResult::Failed(_) => {}
+                ExtractionResult::NoContent
+                | ExtractionResult::Failed(_)
+                | ExtractionResult::Partial { .. } => {}
                 ExtractionResult::Extracted(contents) => {
                     // If extracted, content should be within limits
                     for c in contents {
