@@ -388,6 +388,25 @@ pub fn print_colorful_warning(
         );
     }
 
+    // Empty line before feedback link
+    let _ = writeln!(handle, "{}{}{}", "│".red(), " ".repeat(WIDTH), "│".red());
+
+    // Report false positive link
+    for line in [
+        "  False positive? File an issue:",
+        "  https://github.com/Dicklesworthstone/destructive_command_guard",
+        "  /issues/new?template=false_positive.yml",
+    ] {
+        let _ = write!(handle, "{}", "│".red());
+        let _ = write!(handle, "{}", line.bright_black());
+        let _ = writeln!(
+            handle,
+            "{}{}",
+            " ".repeat(WIDTH.saturating_sub(line.len())),
+            "│".red()
+        );
+    }
+
     // Bottom border with corners
     let _ = writeln!(
         handle,
