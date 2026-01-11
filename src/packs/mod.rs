@@ -534,7 +534,7 @@ impl EnabledKeywordIndex {
 
 /// Static pack entries - metadata is available without instantiating packs.
 /// Packs are built lazily on first access.
-static PACK_ENTRIES: [PackEntry; 73] = [
+static PACK_ENTRIES: [PackEntry; 75] = [
     PackEntry::new("core.git", &["git"], core::git::create_pack),
     PackEntry::new(
         "core.filesystem",
@@ -619,6 +619,11 @@ static PACK_ENTRIES: [PackEntry; 73] = [
         dns::generic::create_pack,
     ),
     PackEntry::new("email.ses", &["ses", "sesv2"], email::ses::create_pack),
+    PackEntry::new(
+        "email.sendgrid",
+        &["sendgrid", "api.sendgrid.com"],
+        email::sendgrid::create_pack,
+    ),
     PackEntry::new(
         "loadbalancer.haproxy",
         &["haproxy", "socat"],
@@ -862,6 +867,11 @@ static PACK_ENTRIES: [PackEntry; 73] = [
         "apigateway.aws",
         &["aws", "apigateway", "apigatewayv2"],
         apigateway::aws::create_pack,
+    ),
+    PackEntry::new(
+        "apigateway.kong",
+        &["kong", "deck", "8001"],
+        apigateway::kong::create_pack,
     ),
     PackEntry::new(
         "infrastructure.terraform",
