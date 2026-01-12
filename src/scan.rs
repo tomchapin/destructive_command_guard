@@ -2125,7 +2125,7 @@ pub fn extract_terraform_from_str(
                         let inner_line = lines[idx];
                         let inner_trimmed = inner_line.trim();
 
-                        if inner_trimmed == "}" {
+                        if is_hcl_block_end(inner_trimmed) {
                             let inner_indent = inner_line.len() - inner_line.trim_start().len();
                             if inner_indent <= block_indent {
                                 break;
@@ -2190,7 +2190,7 @@ pub fn extract_terraform_from_str(
                         let inner_line = lines[idx];
                         let inner_trimmed = inner_line.trim();
 
-                        if inner_trimmed == "}" {
+                        if is_hcl_block_end(inner_trimmed) {
                             let inner_indent = inner_line.len() - inner_line.trim_start().len();
                             if inner_indent <= block_indent {
                                 break;
@@ -2300,6 +2300,15 @@ fn extract_quoted_string(s: &str) -> Option<String> {
         return Some(s[1..s.len() - 1].to_string());
     }
     None
+}
+
+fn is_hcl_block_end(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(rest) = trimmed.strip_prefix('}') else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    rest.is_empty() || rest.starts_with('#') || rest.starts_with("//")
 }
 
 /// Returns (marker, `is_stripping`) where `is_stripping` is true for `<<-` heredocs
@@ -3968,6 +3977,24 @@ resource "null_resource" "test" {
   # provisioner "local-exec" { command = "rm -rf" }
   provisioner "local-exec" {
     command = "rm -rf /actual"
+  }
+}
+"#;
+        let extracted = extract_terraform_from_str("main.tf", content, &["rm"]);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].command, "rm -rf /actual");
+    }
+
+    #[test]
+    fn terraform_block_end_with_comment_stops_extraction() {
+        let content = r#"
+resource "null_resource" "test" {
+  provisioner "local-exec" {
+    command = "rm -rf /actual"
+  } // end local-exec
+
+  triggers = {
+    command = "rm -rf /should-not-extract"
   }
 }
 "#;
