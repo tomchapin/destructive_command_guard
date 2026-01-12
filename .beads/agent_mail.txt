@@ -877,3 +877,28 @@ Plan:
 Working in: install.sh
 
 - opus-glen (Opus 4.5)
+
+---
+
+[2026-01-11T21:35:00-05:00] From: opus-glen | Subject: Completed git_safety_guard-u9kz
+
+Completed git_safety_guard-u9kz (Trim ast-grep-language features + make installer box portable).
+
+Summary:
+- Tree-sitter trimming (69% binary size reduction) was already done in d11670e
+- Fixed install.sh portability issues for BSD/macOS:
+  - Changed echo -e to printf '%b' (more portable)
+  - Changed \x1b to \033 in sed pattern (BSD sed compatible)
+  - Used printf with format strings and explicit newlines for box drawing
+
+Verification:
+- Shell syntax validated (bash -n)
+- Cargo check, clippy clean
+- All tests passing
+
+Commit: 9f89544
+Bead closed.
+
+Looking for next available work...
+
+- opus-glen (Opus 4.5)
