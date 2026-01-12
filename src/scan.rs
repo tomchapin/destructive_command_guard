@@ -606,6 +606,9 @@ pub fn scan_paths(
     options: &ScanOptions,
     config: &Config,
     ctx: &ScanEvalContext,
+    include: &[String],
+    exclude: &[String],
+    repo_root: Option<&Path>,
 ) -> Result<ScanReport, String> {
     let started = std::time::Instant::now();
 
@@ -617,6 +620,10 @@ pub fn scan_paths(
 
     files.sort();
     files.dedup();
+
+    if !include.is_empty() || !exclude.is_empty() {
+        files = filter_paths(&files, include, exclude, repo_root);
+    }
 
     let mut files_scanned = 0usize;
     let mut files_skipped = 0usize;
@@ -810,6 +817,177 @@ fn collect_files_recursively(
     for entry in entries {
         collect_files_recursively(&entry, out, visited);
     }
+}
+
+/// Filter paths by include/exclude glob patterns.
+pub(crate) fn filter_paths(
+    paths: &[PathBuf],
+    include: &[String],
+    exclude: &[String],
+    repo_root: Option<&Path>,
+) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .filter(|p| {
+            let candidates = build_glob_candidates(p, repo_root);
+
+            // If include patterns are specified, path must match at least one
+            if !include.is_empty() {
+                let matches_include = include.iter().any(|pattern| {
+                    candidates
+                        .iter()
+                        .any(|candidate| glob_match(pattern, candidate))
+                });
+                if !matches_include {
+                    return false;
+                }
+            }
+
+            // Path must not match any exclude pattern
+            !exclude.iter().any(|pattern| {
+                candidates
+                    .iter()
+                    .any(|candidate| glob_match(pattern, candidate))
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn build_glob_candidates(path: &Path, repo_root: Option<&Path>) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    let raw = path.to_string_lossy().to_string();
+    let raw_norm = raw.replace('\\', "/");
+    candidates.push(raw_norm.clone());
+
+    if let Some(stripped) = raw_norm.strip_prefix("./") {
+        candidates.push(stripped.to_string());
+    }
+
+    if let Some(root) = repo_root {
+        let joined = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+
+        if let Ok(rel) = joined.strip_prefix(root) {
+            let rel_norm = rel.to_string_lossy().replace('\\', "/");
+            if !rel_norm.is_empty() {
+                candidates.push(rel_norm.clone());
+                if let Some(stripped) = rel_norm.strip_prefix("./") {
+                    candidates.push(stripped.to_string());
+                }
+            }
+        }
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+/// Simple glob matching (supports * and **).
+fn glob_match(pattern: &str, path: &str) -> bool {
+    use std::borrow::Cow;
+
+    fn normalize_separators(s: &str) -> Cow<'_, str> {
+        if s.contains('\\') {
+            Cow::Owned(s.replace('\\', "/"))
+        } else {
+            Cow::Borrowed(s)
+        }
+    }
+
+    fn matches_glob_prefix(prefix_raw: &str, path: &str) -> bool {
+        if prefix_raw.is_empty() {
+            return true;
+        }
+
+        // Allow matching the prefix directory itself (e.g., pattern `src/**` should match `src`)
+        // while still requiring a path boundary (avoid matching `src2/...`).
+        let prefix_no_slash = prefix_raw.trim_end_matches('/');
+        if path == prefix_no_slash {
+            return true;
+        }
+
+        if prefix_raw.ends_with('/') {
+            return path.starts_with(prefix_raw);
+        }
+
+        // If the pattern author omitted a trailing '/', enforce a boundary at the next char.
+        if !path.starts_with(prefix_raw) {
+            return false;
+        }
+
+        path.as_bytes()
+            .get(prefix_raw.len())
+            .is_some_and(|b| *b == b'/')
+    }
+
+    let pattern = normalize_separators(pattern);
+    let path = normalize_separators(path);
+    let pattern = pattern.as_ref();
+    let path = path.as_ref();
+
+    // Very basic glob support for now - full glob crate could be added later
+    if let Some((prefix_raw, suffix_raw)) = pattern.split_once("**") {
+        // ** matches any path segment(s)
+        if !matches_glob_prefix(prefix_raw, path) {
+            return false;
+        }
+
+        let suffix = suffix_raw.trim_start_matches('/');
+        if suffix.is_empty() {
+            return true;
+        }
+
+        // For suffix like "*.rs", check the final path component.
+        if suffix.contains('*') && !suffix.contains('/') {
+            let last = path.rsplit('/').next().unwrap_or(path);
+            let parts: Vec<&str> = suffix.split('*').collect();
+            if parts.len() == 2 {
+                let (pre, suf) = (parts[0], parts[1]);
+                if !last.starts_with(pre) || !last.ends_with(suf) {
+                    return false;
+                }
+
+                let min_len = pre.len() + suf.len();
+                return last.len() >= min_len;
+            }
+        }
+
+        return path.ends_with(suffix);
+    }
+
+    if pattern.contains('*') {
+        // Single * matches anything except /
+        let parts: Vec<&str> = pattern.split('*').collect();
+        if parts.len() == 2 {
+            let prefix = parts[0];
+            let suffix = parts[1];
+
+            if !path.starts_with(prefix) || !path.ends_with(suffix) {
+                return false;
+            }
+
+            // Check that prefix and suffix don't overlap
+            // e.g., pattern "test*st" should NOT match "test" because the middle would be negative
+            let min_len = prefix.len() + suffix.len();
+            if path.len() < min_len {
+                return false;
+            }
+
+            // The middle section (between prefix and suffix) must not contain /
+            let middle_start = prefix.len();
+            let middle_end = path.len() - suffix.len();
+            return !path[middle_start..middle_end].contains('/');
+        }
+    }
+
+    // Exact match
+    pattern == path
 }
 
 // ============================================================================
@@ -2843,6 +3021,96 @@ fail_on = "nope"
             err.to_lowercase().contains("fail_on") || err.to_lowercase().contains("unknown"),
             "error should mention the invalid value: {err}"
         );
+    }
+
+    #[test]
+    fn filter_paths_matches_repo_relative_include_for_absolute_paths() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(repo_root.join("src")).unwrap();
+
+        let file_path = repo_root.join("src").join("main.rs");
+        let paths = vec![file_path.clone()];
+        let include = vec!["src/**".to_string()];
+        let exclude = Vec::new();
+
+        let filtered = filter_paths(&paths, &include, &exclude, Some(&repo_root));
+        assert_eq!(filtered, vec![file_path]);
+    }
+
+    #[test]
+    fn filter_paths_excludes_repo_relative_glob_for_absolute_paths() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(repo_root.join("target")).unwrap();
+
+        let file_path = repo_root.join("target").join("artifact.bin");
+        let paths = vec![file_path];
+        let include = Vec::new();
+        let exclude = vec!["target/**".to_string()];
+
+        let filtered = filter_paths(&paths, &include, &exclude, Some(&repo_root));
+        assert!(
+            filtered.is_empty(),
+            "target/** should exclude repo-relative paths"
+        );
+    }
+
+    // ========================================================================
+    // Glob matching tests
+    // ========================================================================
+
+    #[test]
+    fn test_glob_match_exact() {
+        assert!(glob_match("src/main.rs", "src/main.rs"));
+        assert!(!glob_match("src/main.rs", "src/lib.rs"));
+    }
+
+    #[test]
+    fn test_glob_match_star() {
+        assert!(glob_match("*.rs", "main.rs"));
+        assert!(glob_match("src/*.rs", "src/main.rs"));
+        assert!(!glob_match("*.rs", "src/main.rs")); // * doesn't match /
+    }
+
+    #[test]
+    fn test_glob_match_double_star() {
+        assert!(glob_match("**/*.rs", "main.rs"));
+        assert!(glob_match("**/*.rs", "src/main.rs"));
+        assert!(glob_match("**/*.rs", "src/deep/nested/main.rs"));
+        assert!(glob_match("src/**", "src/main.rs"));
+        assert!(glob_match("src/**", "src/deep/nested/file.rs"));
+        assert!(glob_match("src/**", "src"));
+        assert!(!glob_match("src/**", "src2/main.rs"));
+        assert!(!glob_match("target/**", "targeted/file.txt"));
+        assert!(!glob_match(
+            ".github/workflows/**",
+            ".github/workflows2/ci.yml"
+        ));
+        assert!(glob_match("src/**", r"src\main.rs"));
+        assert!(glob_match("**/*.rs", r"src\main.rs"));
+    }
+
+    #[test]
+    fn test_glob_match_overlapping_prefix_suffix() {
+        // Edge case: pattern where prefix+suffix > path length would cause panic
+        // without the min_len check in glob_match
+        assert!(!glob_match("test*st", "test")); // "test" ends with "st" but prefix+suffix=6 > 4
+        assert!(glob_match("test*st", "testst")); // exactly prefix+suffix=6, path=6, empty middle
+        assert!(glob_match("test*st", "test_xst")); // middle is "x", valid match
+        assert!(glob_match("a*b", "ab")); // prefix+suffix=2, path=2, empty middle is OK
+        assert!(glob_match("a*b", "axb")); // middle is "x"
+        assert!(!glob_match("a*b", "b")); // doesn't start with "a"
+        // Key edge case: overlapping prefix/suffix where path.len() < prefix.len() + suffix.len()
+        // Pattern "ab*ab" has prefix="ab" (2) + suffix="ab" (2) = min_len 4
+        // Path "ab" has len 2 which is < 4, so cannot match (would panic without min_len check)
+        assert!(!glob_match("ab*ab", "ab")); // path too short
+        assert!(glob_match("ab*ab", "abab")); // exactly min_len, empty middle
+        assert!(glob_match("ab*ab", "abXab")); // middle is "X"
     }
 
     #[test]
