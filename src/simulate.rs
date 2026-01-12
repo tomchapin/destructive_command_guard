@@ -301,46 +301,59 @@ fn parse_line(line: &str, max_command_bytes: Option<usize>) -> ParsedLine {
 
 /// Try to parse a line as hook JSON format.
 ///
-/// Returns `Some(ParsedLine)` if this is valid hook JSON (including Malformed for missing fields),
-/// or `None` if the line is not valid JSON (should fall back to plain command).
+/// Returns `Some(ParsedLine)` if the line is valid JSON that looks like hook input
+/// (including Malformed for missing/invalid fields), or `None` if the line is not
+/// valid JSON or does not resemble hook input (should fall back to plain command).
 fn try_parse_hook_json(line: &str, max_command_bytes: Option<usize>) -> Option<ParsedLine> {
     // Minimal JSON structure we expect:
     // {"tool_name":"Bash","tool_input":{"command":"..."}}
 
-    #[derive(Deserialize)]
-    struct HookInput {
-        tool_name: String,
-        tool_input: Option<ToolInput>,
-    }
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let serde_json::Value::Object(map) = value else {
+        return None;
+    };
 
-    #[derive(Deserialize)]
-    struct ToolInput {
-        command: Option<String>,
-    }
-
-    // Try to parse as JSON - if it fails, return None to fall back to plain command
-    let input: HookInput = serde_json::from_str(line).ok()?;
-
-    // At this point we have valid JSON with tool_name, so treat it as hook format
-    // (even if it's malformed, it's still hook JSON, not a plain command)
+    let tool_name_value = map.get("tool_name")?;
+    let serde_json::Value::String(tool_name) = tool_name_value else {
+        return Some(ParsedLine::Malformed {
+            error: "tool_name must be a string".to_string(),
+        });
+    };
 
     // Check if it's a Bash tool
-    if input.tool_name != "Bash" {
+    if tool_name != "Bash" {
         return Some(ParsedLine::Ignore {
             reason: "non-Bash tool",
         });
     }
 
-    // Extract command - if missing, it's malformed hook JSON (not a plain command)
-    let Some(tool_input) = input.tool_input else {
+    let tool_input_value = map.get("tool_input").ok_or_else(|| ParsedLine::Malformed {
+        error: "missing tool_input".to_string(),
+    });
+    let tool_input_value = match tool_input_value {
+        Ok(value) => value,
+        Err(err) => return Some(err),
+    };
+
+    let serde_json::Value::Object(tool_input_map) = tool_input_value else {
         return Some(ParsedLine::Malformed {
-            error: "missing tool_input".to_string(),
+            error: "tool_input must be an object".to_string(),
         });
     };
 
-    let Some(command) = tool_input.command else {
-        return Some(ParsedLine::Malformed {
+    let command_value = tool_input_map
+        .get("command")
+        .ok_or_else(|| ParsedLine::Malformed {
             error: "missing command in tool_input".to_string(),
+        });
+    let command_value = match command_value {
+        Ok(value) => value,
+        Err(err) => return Some(err),
+    };
+
+    let serde_json::Value::String(command) = command_value else {
+        return Some(ParsedLine::Malformed {
+            error: "command must be a string".to_string(),
         });
     };
 
@@ -357,7 +370,7 @@ fn try_parse_hook_json(line: &str, max_command_bytes: Option<usize>) -> Option<P
     }
 
     Some(ParsedLine::Command {
-        command,
+        command: command.clone(),
         format: SimulateInputFormat::HookJson,
     })
 }
@@ -1090,12 +1103,13 @@ mod tests {
     #[test]
     fn detect_plain_command() {
         let result = parse_line("git status --short", None);
-        match result {
-            ParsedLine::Command { command, format } => {
-                assert_eq!(command, "git status --short");
-                assert_eq!(format, SimulateInputFormat::PlainCommand);
-            }
-            _ => panic!("expected Command, got {result:?}"),
+        assert!(
+            matches!(&result, ParsedLine::Command { .. }),
+            "expected Command, got {result:?}"
+        );
+        if let ParsedLine::Command { command, format } = result {
+            assert_eq!(command, "git status --short");
+            assert_eq!(format, SimulateInputFormat::PlainCommand);
         }
     }
 
@@ -1103,12 +1117,13 @@ mod tests {
     fn detect_hook_json_bash() {
         let line = r#"{"tool_name":"Bash","tool_input":{"command":"git status"}}"#;
         let result = parse_line(line, None);
-        match result {
-            ParsedLine::Command { command, format } => {
-                assert_eq!(command, "git status");
-                assert_eq!(format, SimulateInputFormat::HookJson);
-            }
-            _ => panic!("expected Command, got {result:?}"),
+        assert!(
+            matches!(&result, ParsedLine::Command { .. }),
+            "expected Command, got {result:?}"
+        );
+        if let ParsedLine::Command { command, format } = result {
+            assert_eq!(command, "git status");
+            assert_eq!(format, SimulateInputFormat::HookJson);
         }
     }
 
@@ -1116,11 +1131,38 @@ mod tests {
     fn detect_hook_json_non_bash_ignored() {
         let line = r#"{"tool_name":"Read","tool_input":{"path":"/etc/passwd"}}"#;
         let result = parse_line(line, None);
-        match result {
-            ParsedLine::Ignore { reason } => {
-                assert_eq!(reason, "non-Bash tool");
-            }
-            _ => panic!("expected Ignore, got {result:?}"),
+        assert!(
+            matches!(&result, ParsedLine::Ignore { .. }),
+            "expected Ignore, got {result:?}"
+        );
+        if let ParsedLine::Ignore { reason } = result {
+            assert_eq!(reason, "non-Bash tool");
+        }
+    }
+
+    #[test]
+    fn detect_hook_json_command_wrong_type() {
+        let line = r#"{"tool_name":"Bash","tool_input":{"command":123}}"#;
+        let result = parse_line(line, None);
+        assert!(
+            matches!(&result, ParsedLine::Malformed { .. }),
+            "expected Malformed, got {result:?}"
+        );
+        if let ParsedLine::Malformed { error } = result {
+            assert_eq!(error, "command must be a string");
+        }
+    }
+
+    #[test]
+    fn detect_hook_json_tool_name_wrong_type() {
+        let line = r#"{"tool_name":42,"tool_input":{"command":"git status"}}"#;
+        let result = parse_line(line, None);
+        assert!(
+            matches!(&result, ParsedLine::Malformed { .. }),
+            "expected Malformed, got {result:?}"
+        );
+        if let ParsedLine::Malformed { error } = result {
+            assert_eq!(error, "tool_name must be a string");
         }
     }
 
@@ -1129,12 +1171,13 @@ mod tests {
         // "git status" in base64 = "Z2l0IHN0YXR1cw=="
         let line = "DCG_LOG_V1|2026-01-09T00:00:00Z|allow|Z2l0IHN0YXR1cw==|";
         let result = parse_line(line, None);
-        match result {
-            ParsedLine::Command { command, format } => {
-                assert_eq!(command, "git status");
-                assert_eq!(format, SimulateInputFormat::DecisionLog);
-            }
-            _ => panic!("expected Command, got {result:?}"),
+        assert!(
+            matches!(&result, ParsedLine::Command { .. }),
+            "expected Command, got {result:?}"
+        );
+        if let ParsedLine::Command { command, format } = result {
+            assert_eq!(command, "git status");
+            assert_eq!(format, SimulateInputFormat::DecisionLog);
         }
     }
 
@@ -1150,12 +1193,13 @@ mod tests {
         // Invalid JSON starting with '{' should be treated as a plain command,
         // not malformed. This handles shell brace blocks like `{ echo hello; }`.
         let result = parse_line("{invalid json}", None);
-        match result {
-            ParsedLine::Command { command, format } => {
-                assert_eq!(command, "{invalid json}");
-                assert_eq!(format, SimulateInputFormat::PlainCommand);
-            }
-            _ => panic!("expected Command (PlainCommand), got {result:?}"),
+        assert!(
+            matches!(&result, ParsedLine::Command { .. }),
+            "expected Command (PlainCommand), got {result:?}"
+        );
+        if let ParsedLine::Command { command, format } = result {
+            assert_eq!(command, "{invalid json}");
+            assert_eq!(format, SimulateInputFormat::PlainCommand);
         }
     }
 
@@ -1163,12 +1207,13 @@ mod tests {
     fn shell_brace_block_as_plain_command() {
         // Shell brace blocks should be treated as plain commands
         let result = parse_line("{ echo hello; } | cat", None);
-        match result {
-            ParsedLine::Command { command, format } => {
-                assert_eq!(command, "{ echo hello; } | cat");
-                assert_eq!(format, SimulateInputFormat::PlainCommand);
-            }
-            _ => panic!("expected Command (PlainCommand), got {result:?}"),
+        assert!(
+            matches!(&result, ParsedLine::Command { .. }),
+            "expected Command (PlainCommand), got {result:?}"
+        );
+        if let ParsedLine::Command { command, format } = result {
+            assert_eq!(command, "{ echo hello; } | cat");
+            assert_eq!(format, SimulateInputFormat::PlainCommand);
         }
     }
 
@@ -1178,11 +1223,12 @@ mod tests {
         // (not a plain command)
         let line = r#"{"tool_name":"Bash","tool_input":{}}"#;
         let result = parse_line(line, None);
-        match result {
-            ParsedLine::Malformed { error } => {
-                assert!(error.contains("missing command"));
-            }
-            _ => panic!("expected Malformed, got {result:?}"),
+        assert!(
+            matches!(&result, ParsedLine::Malformed { .. }),
+            "expected Malformed, got {result:?}"
+        );
+        if let ParsedLine::Malformed { error } = result {
+            assert!(error.contains("missing command"));
         }
     }
 
@@ -1190,11 +1236,12 @@ mod tests {
     fn malformed_decision_log_wrong_version() {
         let line = "DCG_LOG_V99|timestamp|allow|cmd|";
         let result = parse_line(line, None);
-        match result {
-            ParsedLine::Malformed { error } => {
-                assert!(error.contains("unsupported log version"));
-            }
-            _ => panic!("expected Malformed, got {result:?}"),
+        assert!(
+            matches!(&result, ParsedLine::Malformed { .. }),
+            "expected Malformed, got {result:?}"
+        );
+        if let ParsedLine::Malformed { error } = result {
+            assert!(error.contains("unsupported log version"));
         }
     }
 
@@ -1206,11 +1253,12 @@ mod tests {
     fn command_length_limit() {
         let long_cmd = "x".repeat(1000);
         let result = parse_line(&long_cmd, Some(500));
-        match result {
-            ParsedLine::Malformed { error } => {
-                assert!(error.contains("exceeds max length"));
-            }
-            _ => panic!("expected Malformed, got {result:?}"),
+        assert!(
+            matches!(&result, ParsedLine::Malformed { .. }),
+            "expected Malformed, got {result:?}"
+        );
+        if let ParsedLine::Malformed { error } = result {
+            assert!(error.contains("exceeds max length"));
         }
     }
 
