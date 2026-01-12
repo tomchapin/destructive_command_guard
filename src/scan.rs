@@ -1213,13 +1213,22 @@ fn extract_dockerfile_from_str(
             continue;
         }
 
-        let cmd_start = if trimmed.len() > 4 { &trimmed[4..] } else { "" };
-        let cmd_trimmed = cmd_start.trim_start();
+        let (command, lines_consumed) =
+            join_dockerfile_continuation(&lines, idx, MAX_CONTINUATION_LINES, MAX_JOINED_CHARS);
 
-        if cmd_trimmed.starts_with('[') {
+        idx += lines_consumed;
+
+        let full_trimmed = command.trim();
+        let cmd_part = if full_trimmed.len() > 4 {
+            full_trimmed[4..].trim_start()
+        } else {
+            continue;
+        };
+
+        if cmd_part.starts_with('[') {
             // Exec-form: RUN ["cmd", "arg1", "arg2"]
             // Join args with spaces to approximate a shell command for scanning.
-            if let Ok(args) = serde_json::from_str::<Vec<String>>(cmd_trimmed) {
+            if let Ok(args) = serde_json::from_str::<Vec<String>>(cmd_part) {
                 let joined = args.join(" ");
                 if !joined.is_empty()
                     && (enabled_keywords.is_empty()
@@ -1235,23 +1244,6 @@ fn extract_dockerfile_from_str(
                     });
                 }
             }
-            idx += 1;
-            continue;
-        }
-
-        let (command, lines_consumed) =
-            join_dockerfile_continuation(&lines, idx, MAX_CONTINUATION_LINES, MAX_JOINED_CHARS);
-
-        idx += lines_consumed;
-
-        let full_trimmed = command.trim();
-        let cmd_part = if full_trimmed.len() > 4 {
-            full_trimmed[4..].trim_start()
-        } else {
-            continue;
-        };
-
-        if cmd_part.starts_with('[') {
             continue;
         }
 
@@ -3506,6 +3498,16 @@ resource "null_resource" "test" {
         assert_eq!(extracted.len(), 2);
         assert_eq!(extracted[0].command, "apt-get update");
         assert_eq!(extracted[1].command, "apt-get install");
+    }
+
+    #[test]
+    fn dockerfile_extractor_handles_exec_form_continuation() {
+        let content = "FROM alpine\nRUN [\"sh\", \"-c\", \\\n  \"rm -rf /tmp\"]";
+        let extracted = extract_dockerfile_from_str("Dockerfile", content, &["rm"]);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].line, 2);
+        assert_eq!(extracted[0].extractor_id, "dockerfile.run.exec");
+        assert_eq!(extracted[0].command, "sh -c rm -rf /tmp");
     }
 
     #[test]
