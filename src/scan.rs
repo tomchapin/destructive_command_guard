@@ -34,6 +34,7 @@ use crate::evaluator::{
 use crate::packs::{DecisionMode, REGISTRY, Severity};
 use crate::suggestions::{SuggestionKind, get_suggestion_by_kind};
 use clap::ValueEnum;
+use memchr::memmem;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1064,8 +1065,70 @@ fn is_shell_var_name(s: &str) -> bool {
     it.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn keyword_contains_whitespace(keyword: &str) -> bool {
+    keyword.bytes().any(|byte| byte.is_ascii_whitespace())
+}
+
+fn keyword_matches_with_whitespace(haystack: &str, keyword: &str) -> bool {
+    let parts: Vec<&str> = keyword.split_whitespace().collect();
+    if parts.is_empty() {
+        return false;
+    }
+
+    let hay = haystack.as_bytes();
+    let first = parts[0].as_bytes();
+    if first.len() > hay.len() {
+        return false;
+    }
+
+    let mut offset = 0;
+    while let Some(pos) = memmem::find(&hay[offset..], first) {
+        let start = offset + pos;
+        let mut idx = start + first.len();
+        let mut matched = true;
+
+        for part in parts.iter().skip(1) {
+            let mut ws = idx;
+            while ws < hay.len() && hay[ws].is_ascii_whitespace() {
+                ws += 1;
+            }
+            if ws == idx {
+                matched = false;
+                break;
+            }
+            idx = ws;
+
+            let part_bytes = part.as_bytes();
+            if idx + part_bytes.len() > hay.len() || &hay[idx..idx + part_bytes.len()] != part_bytes
+            {
+                matched = false;
+                break;
+            }
+            idx += part_bytes.len();
+        }
+
+        if matched {
+            return true;
+        }
+
+        offset = start + 1;
+    }
+
+    false
+}
+
 fn contains_any_keyword(haystack: &str, keywords: &[&'static str]) -> bool {
-    keywords.iter().any(|k| haystack.contains(k))
+    keywords.iter().any(|keyword| {
+        if keyword.is_empty() {
+            return false;
+        }
+
+        if keyword_contains_whitespace(keyword) {
+            keyword_matches_with_whitespace(haystack, keyword)
+        } else {
+            haystack.contains(keyword)
+        }
+    })
 }
 
 fn strip_shell_inline_comment(s: &str) -> &str {
@@ -2024,8 +2087,8 @@ pub fn extract_package_json_from_str(
         let line_no = find_json_key_line(&line_map, script_name, "scripts");
 
         // Check if the command contains any enabled keywords
-        let has_keyword = enabled_keywords.is_empty()
-            || enabled_keywords.iter().any(|kw| script_cmd.contains(kw));
+        let has_keyword =
+            enabled_keywords.is_empty() || contains_any_keyword(script_cmd, enabled_keywords);
 
         if has_keyword {
             out.push(ExtractedCommand {
@@ -2151,7 +2214,7 @@ pub fn extract_terraform_from_str(
 
                         if let Some(cmd) = extract_hcl_string_value(inner_trimmed, "command") {
                             let has_keyword = enabled_keywords.is_empty()
-                                || enabled_keywords.iter().any(|kw| cmd.contains(kw));
+                                || contains_any_keyword(&cmd, enabled_keywords);
                             if has_keyword {
                                 out.push(ExtractedCommand {
                                     file: file.to_string(),
@@ -2219,7 +2282,7 @@ pub fn extract_terraform_from_str(
                             if inner_trimmed.contains('[') && inner_trimmed.contains(']') {
                                 for cmd in extract_hcl_array_items(inner_trimmed) {
                                     let has_keyword = enabled_keywords.is_empty()
-                                        || enabled_keywords.iter().any(|kw| cmd.contains(kw));
+                                        || contains_any_keyword(&cmd, enabled_keywords);
                                     if has_keyword {
                                         out.push(ExtractedCommand {
                                             file: file.to_string(),
@@ -2242,7 +2305,7 @@ pub fn extract_terraform_from_str(
                                     }
                                     if let Some(cmd) = extract_quoted_string(arr_line) {
                                         let has_keyword = enabled_keywords.is_empty()
-                                            || enabled_keywords.iter().any(|kw| cmd.contains(kw));
+                                            || contains_any_keyword(&cmd, enabled_keywords);
                                         if has_keyword {
                                             out.push(ExtractedCommand {
                                                 file: file.to_string(),
@@ -2571,7 +2634,7 @@ fn extract_docker_compose_command(
     if let Some(items) = parse_inline_yaml_sequence(value) {
         // Join array elements to form the command
         let cmd = items.join(" ");
-        if enabled_keywords.is_empty() || enabled_keywords.iter().any(|kw| cmd.contains(kw)) {
+        if enabled_keywords.is_empty() || contains_any_keyword(&cmd, enabled_keywords) {
             out.push(ExtractedCommand {
                 file: file.to_string(),
                 line: line_no,
@@ -2625,7 +2688,7 @@ fn extract_docker_compose_command(
 
         if !cmd_parts.is_empty() {
             let cmd = cmd_parts.join(" ");
-            if enabled_keywords.is_empty() || enabled_keywords.iter().any(|kw| cmd.contains(kw)) {
+            if enabled_keywords.is_empty() || contains_any_keyword(&cmd, enabled_keywords) {
                 out.push(ExtractedCommand {
                     file: file.to_string(),
                     line: line_no,
@@ -2642,7 +2705,7 @@ fn extract_docker_compose_command(
     // Handle inline string: command: /bin/sh -c "rm -rf /"
     // Strip quotes if present
     let cmd = value.trim_matches('"').trim_matches('\'').to_string();
-    if enabled_keywords.is_empty() || enabled_keywords.iter().any(|kw| cmd.contains(kw)) {
+    if enabled_keywords.is_empty() || contains_any_keyword(&cmd, enabled_keywords) {
         out.push(ExtractedCommand {
             file: file.to_string(),
             line: line_no,
@@ -3820,6 +3883,19 @@ all:\n\
         assert_eq!(extracted[0].command, "rm -rf dist");
         assert_eq!(extracted[0].extractor_id, "package_json.script");
         assert!(extracted[0].metadata.is_some());
+    }
+
+    #[test]
+    fn package_json_matches_multiword_keywords_with_extra_whitespace() {
+        let content = r#"{
+  "scripts": {
+    "sync": "gcloud   storage rm gs://bucket"
+  }
+}"#;
+
+        let extracted = extract_package_json_from_str("package.json", content, &["gcloud storage"]);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].command, "gcloud   storage rm gs://bucket");
     }
 
     #[test]
