@@ -1771,22 +1771,92 @@ fn parse_yaml_block(
 }
 
 fn parse_inline_yaml_sequence(value: &str) -> Option<Vec<String>> {
-    let trimmed = value.trim();
-    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+    let trimmed = value.trim_start();
+    if !trimmed.starts_with('[') {
         return None;
     }
-    let inner = trimmed.trim_start_matches('[').trim_end_matches(']');
-    let mut out = Vec::new();
 
-    for part in inner.split(',') {
-        let item = part.trim();
-        if item.is_empty() {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut end_idx = None;
+
+    for (idx, c) in trimmed.char_indices() {
+        if idx == 0 {
             continue;
         }
-        let unquoted = item.trim_matches(&['"', '\''][..]);
-        if !unquoted.is_empty() {
-            out.push(unquoted.to_string());
+
+        if escaped {
+            escaped = false;
+            continue;
         }
+
+        if in_double && c == '\\' {
+            escaped = true;
+            continue;
+        }
+
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ']' if !in_single && !in_double => {
+                end_idx = Some(idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let end_idx = end_idx?;
+
+    let rest = trimmed[end_idx + 1..].trim_start();
+    if !rest.is_empty() && !rest.starts_with('#') {
+        return None;
+    }
+
+    let inner = &trimmed[1..end_idx];
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    in_single = false;
+    in_double = false;
+    escaped = false;
+
+    for c in inner.chars() {
+        if escaped {
+            buf.push(c);
+            escaped = false;
+            continue;
+        }
+
+        if in_double && c == '\\' {
+            buf.push(c);
+            escaped = true;
+            continue;
+        }
+
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                buf.push(c);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                buf.push(c);
+            }
+            ',' if !in_single && !in_double => {
+                let item = buf.trim();
+                if !item.is_empty() {
+                    out.push(unquote_yaml_scalar(item));
+                }
+                buf.clear();
+            }
+            _ => buf.push(c),
+        }
+    }
+
+    let item = buf.trim();
+    if !item.is_empty() {
+        out.push(unquote_yaml_scalar(item));
     }
 
     Some(out)
@@ -3966,6 +4036,18 @@ services:
         let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &["rm"]);
         assert_eq!(extracted.len(), 1);
         assert!(extracted[0].command.contains("rm"));
+    }
+
+    #[test]
+    fn docker_compose_array_command_preserves_commas_in_quotes() {
+        let content = r#"
+services:
+  app:
+    command: ["sh", "-c", "echo a,b && rm -rf /cache"]
+"#;
+        let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &["rm"]);
+        assert_eq!(extracted.len(), 1);
+        assert!(extracted[0].command.contains("a,b"));
     }
 
     #[test]
