@@ -631,13 +631,19 @@ fn unquote_env_s_arg(arg: &str) -> String {
 /// Strip `command` wrapper, but NOT when used in query mode (`-v`/`-V`).
 fn strip_command_wrapper(command: &str) -> Option<(String, StrippedWrapper)> {
     let trimmed = command.trim_start();
-    if !trimmed.starts_with("command") {
+
+    // Check for "command" or "/path/to/command"
+    let first_word_end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    let first_word = &trimmed[..first_word_end];
+    let basename = first_word.rsplit('/').next().unwrap_or(first_word);
+
+    if basename != "command" {
         return None;
     }
 
-    // Must be followed by whitespace
-    let after_command = &trimmed[7..];
-    if !after_command.starts_with(char::is_whitespace) {
+    // Must be followed by whitespace or end
+    let after_command = &trimmed[first_word.len()..];
+    if !after_command.is_empty() && !after_command.starts_with(char::is_whitespace) {
         return None;
     }
 
@@ -927,7 +933,8 @@ impl NormalizeWrapper {
     #[inline]
     #[must_use]
     pub fn from_command_word(word: &str) -> Option<Self> {
-        match word {
+        let base_name = word.rsplit('/').next().unwrap_or(word);
+        match base_name {
             "sudo" => Some(Self::Sudo {
                 options_ended: false,
                 skip_next: 0,
@@ -1514,8 +1521,20 @@ mod tests {
     }
 
     #[test]
+    fn test_command_wrapper_with_path() {
+        let result = strip_wrapper_prefixes("/usr/bin/command git reset --hard");
+        assert_eq!(result.normalized, "git reset --hard");
+    }
+
+    #[test]
     fn test_command_v_not_wrapper() {
         let result = strip_wrapper_prefixes("command -v git");
+        assert!(!result.was_normalized());
+    }
+
+    #[test]
+    fn test_command_v_with_path_not_wrapper() {
+        let result = strip_wrapper_prefixes("/usr/bin/command -v git");
         assert!(!result.was_normalized());
     }
 
