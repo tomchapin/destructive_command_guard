@@ -301,7 +301,7 @@ fn path_is_safe_unquoted(path: &str) -> bool {
     if let Some(rest) = path.strip_prefix("$TMPDIR/") {
         return !has_dotdot_segment(rest);
     }
-    if let Some(rest) = path.strip_prefix("${TMPDIR") {
+    if let Some(rest) = path.strip_prefix("${TMPDIR}/") {
         return !has_dotdot_segment(rest);
     }
     false
@@ -311,7 +311,7 @@ fn path_is_safe_double_quoted(path: &str) -> bool {
     if let Some(rest) = path.strip_prefix("$TMPDIR/") {
         return !has_dotdot_segment(rest);
     }
-    if let Some(rest) = path.strip_prefix("${TMPDIR") {
+    if let Some(rest) = path.strip_prefix("${TMPDIR}/") {
         return !has_dotdot_segment(rest);
     }
     false
@@ -381,11 +381,11 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // rm -rf with ${TMPDIR} (braced form)
         safe_pattern!(
             "rm-rf-tmpdir-brace",
-            r"^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:\$\{TMPDIR(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))\S*(?:\s+|$))+$"
+            r"^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:\$\{TMPDIR\}/(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))\S*(?:\s+|$))+$"
         ),
         safe_pattern!(
             "rm-fr-tmpdir-brace",
-            r"^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:\$\{TMPDIR(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))\S*(?:\s+|$))+$"
+            r"^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:\$\{TMPDIR\}/(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))\S*(?:\s+|$))+$"
         ),
         // rm -rf with quoted $TMPDIR
         safe_pattern!(
@@ -399,11 +399,11 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // rm -rf with quoted ${TMPDIR}
         safe_pattern!(
             "rm-rf-tmpdir-brace-quoted",
-            r#"^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:"\$\{TMPDIR(?!(?:[^"]*/)?\.\.(?:/|"))[^"]*"(?:\s+|$))+$"#
+            r#"^rm\s+-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*\s+(?:"\$\{TMPDIR\}/(?!(?:[^"]*/)?\.\.(?:/|"))[^"]*"(?:\s+|$))+$"#
         ),
         safe_pattern!(
             "rm-fr-tmpdir-brace-quoted",
-            r#"^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:"\$\{TMPDIR(?!(?:[^"]*/)?\.\.(?:/|"))[^"]*"(?:\s+|$))+$"#
+            r#"^rm\s+-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*\s+(?:"\$\{TMPDIR\}/(?!(?:[^"]*/)?\.\.(?:/|"))[^"]*"(?:\s+|$))+$"#
         ),
         // rm -r -f (separate flags) in /tmp
         safe_pattern!(
@@ -435,11 +435,11 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // rm -r -f (separate flags) with ${TMPDIR}
         safe_pattern!(
             "rm-r-f-tmpdir-brace",
-            r"^rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+(?:\$\{TMPDIR(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))\S*(?:\s+|$))+$"
+            r"^rm\s+(-[a-zA-Z]+\s+)*-[rR]\s+(-[a-zA-Z]+\s+)*-f\s+(?:\$\{TMPDIR\}/(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))\S*(?:\s+|$))+$"
         ),
         safe_pattern!(
             "rm-f-r-tmpdir-brace",
-            r"^rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+(?:\$\{TMPDIR(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))\S*(?:\s+|$))+$"
+            r"^rm\s+(-[a-zA-Z]+\s+)*-f\s+(-[a-zA-Z]+\s+)*-[rR]\s+(?:\$\{TMPDIR\}/(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))\S*(?:\s+|$))+$"
         ),
         // rm --recursive --force (long flags) in /tmp
         safe_pattern!(
@@ -471,11 +471,11 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // rm --recursive --force (long flags) with ${TMPDIR}
         safe_pattern!(
             "rm-recursive-force-tmpdir-brace",
-            r"^rm\s+.*--recursive.*--force\s+(?:\$\{TMPDIR(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))\S*(?:\s+|$))+$"
+            r"^rm\s+.*--recursive.*--force\s+(?:\$\{TMPDIR\}/(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))\S*(?:\s+|$))+$"
         ),
         safe_pattern!(
             "rm-force-recursive-tmpdir-brace",
-            r"^rm\s+.*--force.*--recursive\s+(?:\$\{TMPDIR(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))\S*(?:\s+|$))+$"
+            r"^rm\s+.*--force.*--recursive\s+(?:\$\{TMPDIR\}/(?!\.\.(?:/|\s|$)|[^\s]*/\.\.(?:/|\s|$))\S*(?:\s+|$))+$"
         ),
     ]
 }
@@ -575,6 +575,17 @@ mod tests {
         assert_safe_pattern_matches(&pack, "rm -rf /var/tmp/stuff");
         assert_safe_pattern_matches(&pack, "rm -rf $TMPDIR/junk");
         assert_safe_pattern_matches(&pack, "rm -rf ${TMPDIR}/junk");
+    }
+
+    #[test]
+    fn test_tmpdir_brace_requires_exact_var_name() {
+        let pack = create_pack();
+        assert!(!pack.matches_safe("rm -rf ${TMPDIR_NOT}/junk"));
+        assert_rm_parser_denies(
+            "rm -rf ${TMPDIR_NOT}/junk",
+            RM_RF_GENERAL_NAME,
+            Severity::High,
+        );
     }
 
     #[test]
