@@ -185,11 +185,12 @@ jobs:
       - name: Generate coverage reports
         run: |
           # Generate LCOV from collected data (no re-running tests)
-          cargo llvm-cov report --all-features --workspace \
+          # Note: report subcommand doesn't accept --all-features/--workspace
+          cargo llvm-cov report \
             --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
             --lcov --output-path lcov.info
           # Generate text summary from collected data
-          cargo llvm-cov report --all-features --workspace \
+          cargo llvm-cov report \
             --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
             --text > coverage-summary.txt
           echo "## Coverage Summary" >> $GITHUB_STEP_SUMMARY
