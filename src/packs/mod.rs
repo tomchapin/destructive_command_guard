@@ -61,7 +61,7 @@ pub type PackId = String;
 /// - **Critical**: Always block. These are irreversible, high-confidence detections.
 /// - **High**: Block by default, but allowlistable by rule ID.
 /// - **Medium**: Warn by default (log + continue), blockable via config.
-/// - **Low**: Log only (for telemetry/learning), warneable/blockable via config.
+/// - **Low**: Log only (for history/learning), warneable/blockable via config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Severity {
     /// Always block. Irreversible operations with high confidence.
@@ -77,7 +77,7 @@ pub enum Severity {
     /// Examples: context-dependent patterns, lower-confidence detections.
     Medium,
 
-    /// Log only (silent, for telemetry and learning).
+    /// Log only (silent, for history and learning).
     /// Examples: advisory patterns, patterns under evaluation.
     Low,
 }
@@ -121,7 +121,7 @@ pub enum DecisionMode {
     /// Warn but allow (print warning to stderr, no JSON deny).
     Warn,
 
-    /// Log only (silent allow, record for telemetry).
+    /// Log only (silent allow, record for history).
     Log,
 }
 
