@@ -32,11 +32,11 @@ fn test_windows_path_bypass() {
 
 #[test]
 fn test_cpp_binary_normalization() {
-    // \g++ should be normalized to g++ (if g++ was a guarded command, which it isn't usually, 
+    // \g++ should be normalized to g++ (if g++ was a guarded command, which it isn't usually,
     // but implies the strictness issue).
     // Let's use a hypothetical guarded command that has a + or .
     // For now, just verifying git/rm behavior.
-    
+
     // \rm.exe -rf /
     let cmd = "\\rm.exe -rf /";
     assert!(evaluate(cmd), "Command '{cmd}' should be blocked");

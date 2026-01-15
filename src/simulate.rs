@@ -1715,5 +1715,3 @@ echo world
         assert_eq!(stats.malformed_count, 1);
     }
 }
-
-
