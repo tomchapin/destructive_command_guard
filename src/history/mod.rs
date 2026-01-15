@@ -220,9 +220,12 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
     (r"AIza[a-zA-Z0-9_\-]{35}", "[GOOGLE_API_KEY]"),
     // Cloud Provider Secrets
     (r"AKIA[A-Z0-9]{16}", "[AWS_ACCESS_KEY]"),
-    (r"(?i)aws_secret_access_key\s*=\s*\S+", "[AWS_SECRET]"),
     (
-        r"(?i)azure[_\-]?(?:storage|account)[_\-]?key\s*=\s*\S+",
+        r#"(?i)aws_secret_access_key\s*=\s*(?:"[^"]*"|'[^']*'|\S+)"#,
+        "[AWS_SECRET]",
+    ),
+    (
+        r#"(?i)azure[_\-]?(?:storage|account)[_\-]?key\s*=\s*(?:"[^"]*"|'[^']*'|\S+)"#,
         "[AZURE_KEY]",
     ),
     // Tokens
@@ -255,11 +258,11 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
     // Generic Secrets - be conservative to avoid false positives
     // Use [^\s\[\]] to exclude already-redacted values containing brackets
     (
-        r"(?i)(?:password|passwd|pwd)\s*[=:]\s*[^\s\[\]]{8,}",
+        r#"(?i)(?:password|passwd|pwd)\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s\[\]]{8,})"#,
         "[PASSWORD]",
     ),
     (
-        r"(?i)(?:secret|api[_\-]?key)\s*[=:]\s*[^\s\[\]]{16,}",
+        r#"(?i)(?:secret|api[_\-]?key)\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s\[\]]{16,})"#,
         "[SECRET]",
     ),
 ];
@@ -546,5 +549,32 @@ MIIEpAIBAAKCAQEA...
             elapsed < Duration::from_millis(500),
             "Redaction too slow: {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn test_quoted_secrets_redaction() {
+        // Quoted with spaces
+        let input = r#"export AWS_SECRET_ACCESS_KEY="secret with spaces""#;
+        let redacted = redact_secrets(input);
+        assert!(!redacted.contains("with spaces"), "Secret part leaked (quoted)!");
+        assert!(redacted.contains("[AWS_SECRET]"), "Missing label (quoted)");
+
+        // Single quoted
+        let input = r#"export AWS_SECRET_ACCESS_KEY='secret with spaces'"#;
+        let redacted = redact_secrets(input);
+        assert!(!redacted.contains("with spaces"), "Secret part leaked (single quoted)!");
+        assert!(redacted.contains("[AWS_SECRET]"), "Missing label (single quoted)");
+
+        // Unquoted (no spaces)
+        let input = r#"export AWS_SECRET_ACCESS_KEY=secret_no_spaces"#;
+        let redacted = redact_secrets(input);
+        assert!(!redacted.contains("secret_no_spaces"), "Secret part leaked (unquoted)!");
+        assert!(redacted.contains("[AWS_SECRET]"), "Missing label (unquoted)");
+
+        // Quoted password
+        let input = r#"password="my secret password""#;
+        let redacted = redact_secrets(input);
+        assert!(!redacted.contains("my secret"), "Password leaked (quoted)!");
+        assert!(redacted.contains("[PASSWORD]"), "Missing label (password)");
     }
 }
