@@ -1,4 +1,4 @@
-//! Test database factory for telemetry tests.
+//! Test database factory for history tests.
 //!
 //! Provides isolated test databases that are automatically cleaned up.
 //!
@@ -32,7 +32,7 @@ static TEST_DB_COUNTER: AtomicU32 = AtomicU32::new(0);
 /// // temp directory cleaned up automatically when test_db goes out of scope
 /// ```
 pub struct TestDb {
-    /// The telemetry database handle.
+    /// The history database handle.
     pub db: HistoryDb,
     /// Path to the database file.
     pub path: PathBuf,
@@ -52,10 +52,10 @@ impl TestDb {
     pub fn new() -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp directory for TestDb");
         let id = TEST_DB_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = temp_dir.path().join(format!("test_telemetry_{id}.db"));
+        let path = temp_dir.path().join(format!("test_history_{id}.db"));
 
         let db =
-            HistoryDb::open(Some(path.clone())).expect("Failed to create test telemetry database");
+            HistoryDb::open(Some(path.clone())).expect("Failed to create test history database");
 
         Self {
             db,

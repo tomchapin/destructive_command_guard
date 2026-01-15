@@ -407,11 +407,11 @@ fn test_vacuum_operation() {
 }
 
 #[test]
-fn test_telemetry_writer_logs_allow() {
+fn test_history_writer_logs_allow() {
     init_test_logging();
 
     let temp_dir = TempDir::new().expect("temp dir");
-    let db_path = temp_dir.path().join("telemetry_writer_allow.db");
+    let db_path = temp_dir.path().join("history_writer_allow.db");
     let db = HistoryDb::open(Some(db_path.clone())).expect("open db");
 
     let config = HistoryConfig {
@@ -436,11 +436,11 @@ fn test_telemetry_writer_logs_allow() {
 }
 
 #[test]
-fn test_telemetry_writer_respects_disabled() {
+fn test_history_writer_respects_disabled() {
     init_test_logging();
 
     let temp_dir = TempDir::new().expect("temp dir");
-    let db_path = temp_dir.path().join("telemetry_writer_disabled.db");
+    let db_path = temp_dir.path().join("history_writer_disabled.db");
     let db = HistoryDb::open(Some(db_path.clone())).expect("open db");
 
     let config = HistoryConfig {
@@ -464,11 +464,11 @@ fn test_telemetry_writer_respects_disabled() {
 }
 
 #[test]
-fn test_telemetry_writer_full_redaction() {
+fn test_history_writer_full_redaction() {
     init_test_logging();
 
     let temp_dir = TempDir::new().expect("temp dir");
-    let db_path = temp_dir.path().join("telemetry_writer_redaction.db");
+    let db_path = temp_dir.path().join("history_writer_redaction.db");
     let db = HistoryDb::open(Some(db_path.clone())).expect("open db");
 
     let config = HistoryConfig {
@@ -497,11 +497,11 @@ fn test_telemetry_writer_full_redaction() {
 }
 
 #[test]
-fn test_telemetry_writer_logs_deny_with_match_info() {
+fn test_history_writer_logs_deny_with_match_info() {
     init_test_logging();
 
     let temp_dir = TempDir::new().expect("temp dir");
-    let db_path = temp_dir.path().join("telemetry_writer_deny.db");
+    let db_path = temp_dir.path().join("history_writer_deny.db");
     let db = HistoryDb::open(Some(db_path.clone())).expect("open db");
 
     let config = HistoryConfig {
@@ -538,11 +538,11 @@ fn test_telemetry_writer_logs_deny_with_match_info() {
 }
 
 #[test]
-fn test_telemetry_writer_flushes_on_drop() {
+fn test_history_writer_flushes_on_drop() {
     init_test_logging();
 
     let temp_dir = TempDir::new().expect("temp dir");
-    let db_path = temp_dir.path().join("telemetry_writer_drop.db");
+    let db_path = temp_dir.path().join("history_writer_drop.db");
     let db = HistoryDb::open(Some(db_path.clone())).expect("open db");
 
     let config = HistoryConfig {
@@ -568,11 +568,11 @@ fn test_telemetry_writer_flushes_on_drop() {
 }
 
 #[test]
-fn test_telemetry_writer_async_performance() {
+fn test_history_writer_async_performance() {
     init_test_logging();
 
     let temp_dir = TempDir::new().expect("temp dir");
-    let db_path = temp_dir.path().join("telemetry_writer_perf.db");
+    let db_path = temp_dir.path().join("history_writer_perf.db");
     let db = HistoryDb::open(Some(db_path.clone())).expect("open db");
 
     let config = HistoryConfig {
