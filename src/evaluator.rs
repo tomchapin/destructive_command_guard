@@ -894,15 +894,41 @@ fn evaluate_packs_with_allowlists(
     let rm_parse =
         has_filesystem_pack.then(|| crate::packs::core::filesystem::parse_rm_command(normalized));
 
-    // Single-pass per-pack evaluation: safe patterns only protect their own pack's
-    // destructive patterns, not other packs. This prevents compound command bypass
-    // where e.g., "git checkout -b foo" safe pattern would whitelist "rm -rf / ; git checkout -b foo".
+    // Two-pass evaluation for cross-pack safe pattern support.
     //
-    // For each pack:
-    // 1. Check safe patterns - if match, skip this pack's destructive patterns (continue)
-    // 2. Check destructive patterns - if match, block (unless allowlisted)
-    //
-    // The rm_parse optimization for core.filesystem is handled inline.
+    // Pass 1: Check safe patterns across ALL enabled packs first.
+    // If any pack's safe pattern matches, allow the command immediately.
+
+    // that would otherwise be blocked by other packs (like core.filesystem).
+    if matches!(
+        rm_parse.as_ref(),
+        Some(crate::packs::core::filesystem::RmParseDecision::Allow)
+    ) {
+        return EvaluationResult::allowed();
+    }
+
+    for (pack_id, pack) in &candidate_packs {
+        if deadline_exceeded(deadline) || remaining_below(deadline, &crate::perf::PATTERN_MATCH) {
+            return EvaluationResult::allowed_due_to_budget();
+        }
+
+        // If any safe pattern matches, allow immediately (cross-pack override).
+        if pack_id.as_str() == "core.filesystem" {
+            if matches!(
+                rm_parse.as_ref(),
+                Some(crate::packs::core::filesystem::RmParseDecision::NoMatch)
+            ) && pack.matches_safe(normalized)
+            {
+                return EvaluationResult::allowed();
+            }
+        } else if pack.matches_safe(normalized) {
+            return EvaluationResult::allowed();
+        }
+    }
+
+    // Pass 2: Check destructive patterns across all packs.
+    // If we allowlist a deny, we keep scanning for other denies. If none appear,
+    // we return ALLOW + the first allowlist override metadata for explain/logging.
     let mut first_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
 
     for &(pack_id, pack) in &candidate_packs {
@@ -910,22 +936,12 @@ fn evaluate_packs_with_allowlists(
             return EvaluationResult::allowed_due_to_budget();
         }
 
-        // Check safe patterns for this pack first.
-        // If a safe pattern matches, skip this pack's destructive patterns only.
-        // This prevents compound command bypass where one pack's safe pattern
-        // would whitelist destructive commands from other packs.
         if pack_id == "core.filesystem" {
-            // core.filesystem uses rm_parse for more accurate safe pattern detection
             match rm_parse.as_ref() {
                 Some(crate::packs::core::filesystem::RmParseDecision::Allow) => {
-                    continue; // Safe pattern match - skip this pack
+                    continue;
                 }
-                Some(crate::packs::core::filesystem::RmParseDecision::NoMatch) | None => {
-                    // rm_parse didn't find rm command or wasn't computed, check safe patterns as fallback
-                    if pack.matches_safe(normalized) {
-                        continue;
-                    }
-                }
+                Some(crate::packs::core::filesystem::RmParseDecision::NoMatch) | None => {}
                 Some(crate::packs::core::filesystem::RmParseDecision::Deny(hit)) => {
                     if let Some(allow_hit) = allowlists.match_rule(pack_id, hit.pattern_name) {
                         if first_allowlist_hit.is_none() {
@@ -974,11 +990,6 @@ fn evaluate_packs_with_allowlists(
                         hit.severity,
                     );
                 }
-            }
-        } else {
-            // Non-core.filesystem packs: check safe patterns before destructive
-            if pack.matches_safe(normalized) {
-                continue; // Safe pattern match - skip this pack's destructive patterns
             }
         }
 
