@@ -41,13 +41,14 @@ use crate::config::{HistoryConfig, HistoryRedactionMode};
 use crate::logging::{RedactionConfig, RedactionMode};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use schema::{
-    AgentStat, CURRENT_SCHEMA_VERSION, CommandEntry, DEFAULT_DB_FILENAME, ExportFilters,
-    ExportOptions, ExportedData, HistoryDb, HistoryError, HistoryStats, Outcome, OutcomeStats,
-    PackEffectivenessAnalysis, PackRecommendation, PatternEffectiveness, PatternStat,
-    PerformanceStats, PotentialGap, ProjectStat, RecommendationType, StatsTrends,
+    AgentStat, BackupResult, CURRENT_SCHEMA_VERSION, CheckResult, CommandEntry,
+    DEFAULT_DB_FILENAME, ExportFilters, ExportOptions, ExportedData, HistoryDb, HistoryError,
+    HistoryStats, Outcome, OutcomeStats, PackEffectivenessAnalysis, PackRecommendation,
+    PatternEffectiveness, PatternStat, PerformanceStats, PotentialGap, ProjectStat,
+    RecommendationType, StatsTrends,
 };
 
 /// Environment variable to override the history database path.
@@ -60,6 +61,42 @@ enum HistoryMessage {
     Entry(Box<CommandEntry>),
     Flush(mpsc::Sender<()>),
     Shutdown,
+}
+
+/// Configuration for the history worker thread.
+#[derive(Clone)]
+struct WorkerConfig {
+    batch_size: usize,
+    flush_interval: Duration,
+    auto_prune: bool,
+    retention_days: u32,
+    prune_check_interval: Duration,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 50,
+            flush_interval: Duration::from_millis(100),
+            auto_prune: false,
+            retention_days: 90,
+            prune_check_interval: Duration::from_secs(24 * 3600),
+        }
+    }
+}
+
+impl From<&HistoryConfig> for WorkerConfig {
+    fn from(config: &HistoryConfig) -> Self {
+        Self {
+            batch_size: config.batch_size as usize,
+            flush_interval: Duration::from_millis(u64::from(config.batch_flush_interval_ms)),
+            auto_prune: config.auto_prune,
+            retention_days: config.retention_days,
+            prune_check_interval: Duration::from_secs(
+                u64::from(config.prune_check_interval_hours) * 3600,
+            ),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -78,11 +115,12 @@ impl HistoryFlushHandle {
     }
 }
 
-/// Asynchronous history writer.
+/// Asynchronous history writer with write batching support.
 pub struct HistoryWriter {
     sender: Option<mpsc::Sender<HistoryMessage>>,
     handle: Option<thread::JoinHandle<()>>,
     redaction_mode: HistoryRedactionMode,
+    session_id: String,
 }
 
 impl HistoryWriter {
@@ -95,10 +133,15 @@ impl HistoryWriter {
             return Self::disabled();
         }
 
+        // Generate a unique session ID for this writer instance
+        let session_id = generate_session_id();
+
         let (sender, receiver) = mpsc::channel::<HistoryMessage>();
+        let worker_config = WorkerConfig::from(config);
+
         let Ok(handle) = thread::Builder::new()
             .name("dcg-history-writer".to_string())
-            .spawn(move || history_worker(db, receiver))
+            .spawn(move || history_worker(db, receiver, worker_config))
         else {
             // Thread spawn failed - return disabled writer to avoid leaking
             // messages into a channel with no receiver.
@@ -109,6 +152,7 @@ impl HistoryWriter {
             sender: Some(sender),
             handle: Some(handle),
             redaction_mode: config.redaction_mode,
+            session_id,
         }
     }
 
@@ -118,7 +162,14 @@ impl HistoryWriter {
             sender: None,
             handle: None,
             redaction_mode: HistoryRedactionMode::Pattern,
+            session_id: String::new(),
         }
+    }
+
+    /// Get the session ID for this writer instance.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     #[must_use]
@@ -131,6 +182,10 @@ impl HistoryWriter {
     /// Log a command entry asynchronously.
     pub fn log(&self, mut entry: CommandEntry) {
         entry.command = redact_for_history(&entry.command, self.redaction_mode);
+        // Set session ID if not already set
+        if entry.session_id.is_none() && !self.session_id.is_empty() {
+            entry.session_id = Some(self.session_id.clone());
+        }
         if let Some(sender) = &self.sender {
             let _ = sender.send(HistoryMessage::Entry(Box::new(entry)));
         }
@@ -165,43 +220,185 @@ impl Drop for HistoryWriter {
     }
 }
 
+/// Generate a unique session ID for a writer instance.
+fn generate_session_id() -> String {
+    use sha2::{Digest, Sha256};
+    use std::process;
+
+    let now = chrono::Utc::now();
+    let pid = process::id();
+    let thread_id = format!("{:?}", thread::current().id());
+
+    let mut hasher = Sha256::new();
+    hasher.update(now.timestamp_nanos_opt().unwrap_or(0).to_le_bytes());
+    hasher.update(pid.to_le_bytes());
+    hasher.update(thread_id.as_bytes());
+
+    let digest = hasher.finalize();
+    // Use first 8 bytes for a shorter, more readable ID
+    format!(
+        "ses-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7]
+    )
+}
+
 #[allow(clippy::needless_pass_by_value)]
-fn history_worker(db: HistoryDb, receiver: mpsc::Receiver<HistoryMessage>) {
-    while let Ok(message) = receiver.recv() {
-        match message {
-            HistoryMessage::Entry(entry) => {
-                let _ = db.log_command(&entry);
+fn history_worker(db: HistoryDb, receiver: mpsc::Receiver<HistoryMessage>, config: WorkerConfig) {
+    let mut batch: Vec<CommandEntry> = Vec::with_capacity(config.batch_size);
+    let mut last_flush = Instant::now();
+    let mut last_prune_check = Instant::now();
+
+    // Check if we need auto-prune on startup
+    if config.auto_prune {
+        check_and_prune(&db, config.retention_days);
+    }
+
+    loop {
+        // Use recv_timeout to enable periodic flushing
+        let timeout = config.flush_interval.saturating_sub(last_flush.elapsed());
+        match receiver.recv_timeout(timeout) {
+            Ok(HistoryMessage::Entry(entry)) => {
+                batch.push(*entry);
+
+                // Flush if batch is full
+                if batch.len() >= config.batch_size {
+                    flush_batch(&db, &mut batch);
+                    last_flush = Instant::now();
+                }
             }
-            HistoryMessage::Flush(ack) => {
-                let should_shutdown = drain_history_messages(&db, &receiver);
-                let _ = ack.send(());
+            Ok(HistoryMessage::Flush(ack)) => {
+                // Drain any pending entries first, handling any control message encountered
+                let mut pending_acks = vec![ack];
+                let mut should_shutdown = false;
+                while let Some(msg) =
+                    drain_entries_into_batch(&receiver, &mut batch, config.batch_size)
+                {
+                    match msg {
+                        HistoryMessage::Flush(pending_ack) => pending_acks.push(pending_ack),
+                        HistoryMessage::Shutdown => {
+                            should_shutdown = true;
+                            break;
+                        }
+                        HistoryMessage::Entry(_) => unreachable!(),
+                    }
+                }
+                flush_batch(&db, &mut batch);
+                last_flush = Instant::now();
+                // Send all pending acks
+                for pending_ack in pending_acks {
+                    let _ = pending_ack.send(());
+                }
                 if should_shutdown {
+                    let _ = db.checkpoint();
                     break;
                 }
             }
-            HistoryMessage::Shutdown => {
+            Ok(HistoryMessage::Shutdown) => {
+                // Final flush before shutdown
+                let mut pending_acks = Vec::new();
+                while let Some(msg) =
+                    drain_entries_into_batch(&receiver, &mut batch, config.batch_size)
+                {
+                    match msg {
+                        HistoryMessage::Flush(pending_ack) => pending_acks.push(pending_ack),
+                        HistoryMessage::Shutdown => {} // Already shutting down
+                        HistoryMessage::Entry(_) => unreachable!(),
+                    }
+                }
+                flush_batch(&db, &mut batch);
+                // Send all pending acks before shutdown
+                for pending_ack in pending_acks {
+                    let _ = pending_ack.send(());
+                }
+                // Checkpoint WAL before closing
+                let _ = db.checkpoint();
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Periodic flush on timeout
+                if !batch.is_empty() {
+                    flush_batch(&db, &mut batch);
+                    last_flush = Instant::now();
+                }
+
+                // Check for auto-prune periodically
+                if config.auto_prune && last_prune_check.elapsed() >= config.prune_check_interval {
+                    check_and_prune(&db, config.retention_days);
+                    last_prune_check = Instant::now();
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // Channel closed, flush and exit
+                flush_batch(&db, &mut batch);
+                let _ = db.checkpoint();
                 break;
             }
         }
     }
 }
 
-fn drain_history_messages(db: &HistoryDb, receiver: &mpsc::Receiver<HistoryMessage>) -> bool {
-    let mut shutdown = false;
-    for message in receiver.try_iter() {
-        match message {
-            HistoryMessage::Entry(entry) => {
-                let _ = db.log_command(&entry);
+/// Drain pending entry messages into the batch.
+///
+/// Returns any control message (Flush/Shutdown) encountered during drain
+/// so the caller can handle it properly instead of losing it.
+fn drain_entries_into_batch(
+    receiver: &mpsc::Receiver<HistoryMessage>,
+    batch: &mut Vec<CommandEntry>,
+    batch_size: usize,
+) -> Option<HistoryMessage> {
+    loop {
+        match receiver.try_recv() {
+            Ok(HistoryMessage::Entry(entry)) => {
+                batch.push(*entry);
+                // If batch exceeds limit, return to allow flush
+                if batch.len() >= batch_size * 2 {
+                    return None;
+                }
             }
-            HistoryMessage::Flush(ack) => {
-                let _ = ack.send(());
+            Ok(msg @ (HistoryMessage::Flush(_) | HistoryMessage::Shutdown)) => {
+                // Return control message so caller can handle it
+                return Some(msg);
             }
-            HistoryMessage::Shutdown => {
-                shutdown = true;
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
+                return None;
             }
         }
     }
-    shutdown
+}
+
+/// Flush the batch to the database.
+fn flush_batch(db: &HistoryDb, batch: &mut Vec<CommandEntry>) {
+    if batch.is_empty() {
+        return;
+    }
+
+    // Try batch insert first (more efficient)
+    if batch.len() >= 2 {
+        if let Err(_e) = db.log_commands_batch(batch) {
+            // Fallback to individual inserts on error
+            for entry in batch.iter() {
+                let _ = db.log_command(entry);
+            }
+        }
+    } else {
+        // Single entry, use regular insert
+        for entry in batch.iter() {
+            let _ = db.log_command(entry);
+        }
+    }
+
+    batch.clear();
+}
+
+/// Check if pruning is needed and perform it.
+fn check_and_prune(db: &HistoryDb, retention_days: u32) {
+    // Check if enough time has passed since last prune
+    if let Ok(should_prune) = db.should_auto_prune() {
+        if should_prune {
+            let _ = db.prune_older_than_days(u64::from(retention_days), false);
+            let _ = db.record_prune_timestamp();
+        }
+    }
 }
 
 fn redact_for_history(command: &str, mode: HistoryRedactionMode) -> String {

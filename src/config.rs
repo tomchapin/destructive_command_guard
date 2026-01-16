@@ -1049,6 +1049,14 @@ pub struct HistoryConfig {
     pub max_size_mb: u32,
     /// Optional database file path override.
     pub database_path: Option<String>,
+    /// Enable automatic pruning of old entries.
+    pub auto_prune: bool,
+    /// Interval in hours between automatic prune checks.
+    pub prune_check_interval_hours: u32,
+    /// Batch size for write operations (improves performance).
+    pub batch_size: u32,
+    /// Flush interval in milliseconds for batched writes.
+    pub batch_flush_interval_ms: u32,
 }
 
 impl HistoryConfig {
@@ -1058,6 +1066,12 @@ impl HistoryConfig {
     pub const DEFAULT_MAX_SIZE_MB: u32 = 500;
     /// Maximum allowed retention window (days).
     pub const MAX_RETENTION_DAYS: u32 = 3650;
+    /// Default interval between automatic prune checks (hours).
+    pub const DEFAULT_PRUNE_CHECK_INTERVAL_HOURS: u32 = 24;
+    /// Default batch size for write operations.
+    pub const DEFAULT_BATCH_SIZE: u32 = 50;
+    /// Default flush interval for batched writes (ms).
+    pub const DEFAULT_BATCH_FLUSH_INTERVAL_MS: u32 = 100;
 
     /// Expand the configured database path, if set.
     #[must_use]
@@ -1105,6 +1119,10 @@ impl Default for HistoryConfig {
             retention_days: Self::DEFAULT_RETENTION_DAYS,
             max_size_mb: Self::DEFAULT_MAX_SIZE_MB,
             database_path: None,
+            auto_prune: false,
+            prune_check_interval_hours: Self::DEFAULT_PRUNE_CHECK_INTERVAL_HOURS,
+            batch_size: Self::DEFAULT_BATCH_SIZE,
+            batch_flush_interval_ms: Self::DEFAULT_BATCH_FLUSH_INTERVAL_MS,
         }
     }
 }

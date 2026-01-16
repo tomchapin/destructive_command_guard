@@ -25,8 +25,16 @@ fn test_backslash_exe_bypass() {
 
 #[test]
 fn test_windows_path_bypass() {
-    // Windows path logic
-    let cmd = "C:/Program Files/Git/bin/git.exe reset --hard";
+    // Windows path without spaces - should be blocked
+    let cmd = "C:/Git/bin/git.exe reset --hard";
+    assert!(evaluate(cmd), "Command '{cmd}' should be blocked");
+}
+
+#[test]
+fn test_windows_path_quoted_bypass() {
+    // Windows path with spaces (quoted) - should be blocked
+    // Paths with spaces require quoting to work in shells
+    let cmd = r#""C:/Program Files/Git/bin/git.exe" reset --hard"#;
     assert!(evaluate(cmd), "Command '{cmd}' should be blocked");
 }
 

@@ -66,26 +66,27 @@ const HEREDOC_TRIGGER_PATTERNS: [&str; 12] = [
     // Inline interpreter execution. These patterns intentionally allow:
     // - interleaved flags (python -I -c, bash --norc -c)
     // - combined short-flag clusters (bash -lc, node -pe, perl -pi -e)
+    // - Windows .exe extensions (python.exe, python3.11.exe, etc.)
     //
     // Tier 1 MUST have zero false negatives for Tier 2 extraction.
     //
-    // Python inline execution (matches python, python3, python3.11, python3.12.1, etc.)
-    r"\bpython[0-9.]*\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*[ce][A-Za-z]*\s",
-    // Ruby inline execution (matches ruby, ruby3, ruby3.0, etc.)
-    r"\bruby[0-9.]*\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*e[A-Za-z]*\s",
-    r"\birb[0-9.]*\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*e[A-Za-z]*\s",
-    // Perl inline execution (matches perl, perl5, perl5.36, etc.)
-    r"\bperl[0-9.]*\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*[eE][A-Za-z]*\s",
-    // Node.js inline execution (matches node, node18, nodejs, nodejs18, etc.)
-    r"\bnode(js)?[0-9.]*\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*[ep][A-Za-z]*\s",
+    // Python inline execution (matches python, python3, python3.11, python.exe, python3.11.exe, etc.)
+    r"\bpython[0-9.]*(?:\.exe)?\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*[ce][A-Za-z]*\s",
+    // Ruby inline execution (matches ruby, ruby3, ruby3.0, ruby.exe, etc.)
+    r"\bruby[0-9.]*(?:\.exe)?\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*e[A-Za-z]*\s",
+    r"\birb[0-9.]*(?:\.exe)?\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*e[A-Za-z]*\s",
+    // Perl inline execution (matches perl, perl5, perl5.36, perl.exe, etc.)
+    r"\bperl[0-9.]*(?:\.exe)?\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*[eE][A-Za-z]*\s",
+    // Node.js inline execution (matches node, node18, nodejs, node.exe, etc.)
+    r"\bnode(?:js)?[0-9.]*(?:\.exe)?\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*[ep][A-Za-z]*\s",
     // PHP inline execution
-    r"\bphp[0-9.]*\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*r[A-Za-z]*\s",
+    r"\bphp[0-9.]*(?:\.exe)?\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*r[A-Za-z]*\s",
     // Lua inline execution
-    r"\blua[0-9.]*\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*e[A-Za-z]*\s",
+    r"\blua[0-9.]*(?:\.exe)?\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*e[A-Za-z]*\s",
     // Shell inline execution (sh -c, bash -c, zsh -c, fish -c, bash -lc, etc.)
-    r"\b(sh|bash|zsh|fish)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*c[A-Za-z]*\s",
-    // Piped execution to interpreters (versioned)
-    r"\|\s*(python[0-9.]*|ruby[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|php[0-9.]*|lua[0-9.]*|sh|bash)\b",
+    r"\b(?:sh|bash|zsh|fish)(?:\.exe)?\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*c[A-Za-z]*\s",
+    // Piped execution to interpreters (versioned, with optional .exe)
+    r"\|\s*(?:python[0-9.]*|ruby[0-9.]*|perl[0-9.]*|node(?:js)?[0-9.]*|php[0-9.]*|lua[0-9.]*|sh|bash)(?:\.exe)?\b",
     // Piped to xargs (can execute arbitrary commands)
     r"\|\s*xargs\s",
     // exec/eval in various contexts
@@ -477,20 +478,25 @@ impl ScriptLanguage {
     /// Infer language from a command prefix (e.g., "python", "python3", "python3.11").
     ///
     /// Matches exact command names or names with version suffixes (e.g., "python3.11").
+    /// Also handles Windows .exe extensions (e.g., "python.exe", "python3.11.exe").
     /// Does NOT match arbitrary words that start with a command name (e.g., "shebang" ≠ "sh").
     #[must_use]
     pub fn from_command(cmd: &str) -> Self {
         let cmd_lower = cmd.to_lowercase();
+        // Strip Windows .exe extension if present
+        let cmd_base = cmd_lower
+            .strip_suffix(".exe")
+            .unwrap_or(&cmd_lower);
 
         // Helper: check if cmd matches base name, optionally followed by version digits/dots
         // e.g., "python" matches "python", "python3", "python3.11"
         // but "python" does NOT match "pythonic" or "python_helper"
         let matches_interpreter = |base: &str| -> bool {
-            if cmd_lower == base {
+            if cmd_base == base {
                 return true;
             }
             // Allow version suffixes: digits and dots (e.g., "3", "3.11", "3.11.4")
-            cmd_lower.strip_prefix(base).is_some_and(|suffix| {
+            cmd_base.strip_prefix(base).is_some_and(|suffix| {
                 !suffix.is_empty()
                     && suffix.chars().all(|c| c.is_ascii_digit() || c == '.')
                     && suffix.chars().next().is_some_and(|c| c.is_ascii_digit())
@@ -952,18 +958,20 @@ static HERESTRING_UNQUOTED: LazyLock<Regex> = LazyLock::new(|| {
 /// Regex for inline script flag extraction with single quotes.
 static INLINE_SCRIPT_SINGLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
     // Matches: command -c/-e/-p/-E/-r followed by single-quoted content
-    // Groups: (1) interpreter, (2) optional "js" suffix, (3) flag, (4) content
+    // Groups: (1) interpreter, (2) optional "js" suffix for node, (3) flag, (4) content
     // Supports versioned interpreters: python3.11, ruby3.0, perl5.36, node18, nodejs20, etc.
-    Regex::new(r"\b(python[0-9.]*|ruby[0-9.]*|irb[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|php[0-9.]*|lua[0-9.]*|sh|bash|zsh|fish)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s*'([^']*)'")
+    // Supports Windows .exe extensions: python.exe, python3.11.exe, etc.
+    Regex::new(r"\b(python[0-9.]*(?:\.exe)?|ruby[0-9.]*(?:\.exe)?|irb[0-9.]*(?:\.exe)?|perl[0-9.]*(?:\.exe)?|node(js)?[0-9.]*(?:\.exe)?|php[0-9.]*(?:\.exe)?|lua[0-9.]*(?:\.exe)?|sh(?:\.exe)?|bash(?:\.exe)?|zsh(?:\.exe)?|fish(?:\.exe)?)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s*'([^']*)'")
         .expect("inline script single-quote regex compiles")
 });
 
 /// Regex for inline script flag extraction with double quotes.
 static INLINE_SCRIPT_DOUBLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
     // Matches: command -c/-e/-p/-E/-r followed by double-quoted content
-    // Groups: (1) interpreter, (2) optional "js" suffix, (3) flag, (4) content
+    // Groups: (1) interpreter, (2) optional "js" suffix for node, (3) flag, (4) content
     // Supports versioned interpreters: python3.11, ruby3.0, perl5.36, node18, nodejs20, etc.
-    Regex::new(r#"\b(python[0-9.]*|ruby[0-9.]*|irb[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|php[0-9.]*|lua[0-9.]*|sh|bash|zsh|fish)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s*"([^"]*)""#)
+    // Supports Windows .exe extensions: python.exe, python3.11.exe, etc.
+    Regex::new(r#"\b(python[0-9.]*(?:\.exe)?|ruby[0-9.]*(?:\.exe)?|irb[0-9.]*(?:\.exe)?|perl[0-9.]*(?:\.exe)?|node(js)?[0-9.]*(?:\.exe)?|php[0-9.]*(?:\.exe)?|lua[0-9.]*(?:\.exe)?|sh(?:\.exe)?|bash(?:\.exe)?|zsh(?:\.exe)?|fish(?:\.exe)?)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s*"([^"]*)""#)
         .expect("inline script double-quote regex compiles")
 });
 

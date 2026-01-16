@@ -171,8 +171,8 @@ pub use confidence::{
 
 // Re-export history types for command tracking
 pub use history::{
-    AgentStat, CURRENT_SCHEMA_VERSION, CommandEntry, DEFAULT_DB_FILENAME, ENV_HISTORY_DB_PATH,
-    ENV_HISTORY_DISABLED, HistoryDb, HistoryError, HistoryStats, HistoryWriter,
-    Outcome as HistoryOutcome, OutcomeStats, PatternStat, PerformanceStats, ProjectStat,
-    StatsTrends,
+    AgentStat, BackupResult, CURRENT_SCHEMA_VERSION, CheckResult, CommandEntry,
+    DEFAULT_DB_FILENAME, ENV_HISTORY_DB_PATH, ENV_HISTORY_DISABLED, HistoryDb, HistoryError,
+    HistoryStats, HistoryWriter, Outcome as HistoryOutcome, OutcomeStats, PatternStat,
+    PerformanceStats, ProjectStat, StatsTrends,
 };

@@ -18,7 +18,7 @@ use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
 
 /// Current schema version for migrations.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Default database filename.
 pub const DEFAULT_DB_FILENAME: &str = "history.db";
@@ -34,6 +34,10 @@ pub enum HistoryError {
     SchemaMismatch { expected: u32, found: u32 },
     /// Database is disabled.
     Disabled,
+    /// Database integrity check failed.
+    IntegrityCheckFailed(String),
+    /// Backup operation failed.
+    BackupFailed(String),
 }
 
 impl std::fmt::Display for HistoryError {
@@ -45,6 +49,8 @@ impl std::fmt::Display for HistoryError {
                 write!(f, "Schema mismatch: expected v{expected}, found v{found}")
             }
             Self::Disabled => write!(f, "History is disabled"),
+            Self::IntegrityCheckFailed(msg) => write!(f, "Integrity check failed: {msg}"),
+            Self::BackupFailed(msg) => write!(f, "Backup failed: {msg}"),
         }
     }
 }
@@ -232,6 +238,52 @@ pub struct StatsTrends {
     pub commands_change: f64,
     pub block_rate_change: f64,
     pub top_pattern_change: Vec<(String, i32)>,
+}
+
+/// Result of a database health check.
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckResult {
+    /// `SQLite` integrity check result (should be "ok").
+    pub integrity_check: String,
+    /// Whether the integrity check passed.
+    pub integrity_ok: bool,
+    /// Foreign key check result count (0 = no violations).
+    pub foreign_key_violations: usize,
+    /// Number of commands in main table.
+    pub commands_count: u64,
+    /// Number of entries in FTS index.
+    pub fts_count: u64,
+    /// Whether FTS index is in sync with main table.
+    pub fts_in_sync: bool,
+    /// Current journal mode.
+    pub journal_mode: String,
+    /// Database file size in bytes.
+    pub file_size_bytes: u64,
+    /// WAL file size in bytes (0 if not using WAL).
+    pub wal_size_bytes: u64,
+    /// Current schema version.
+    pub schema_version: u32,
+    /// Page size in bytes.
+    pub page_size: u32,
+    /// Total page count.
+    pub page_count: u64,
+    /// Free list page count.
+    pub freelist_count: u64,
+}
+
+/// Result of a database backup operation.
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupResult {
+    /// Path to the backup file.
+    pub backup_path: String,
+    /// Size of the backup file in bytes.
+    pub backup_size_bytes: u64,
+    /// Whether the backup was compressed.
+    pub compressed: bool,
+    /// Time taken to create backup in milliseconds.
+    pub duration_ms: u64,
+    /// Whether backup integrity was verified.
+    pub verified: bool,
 }
 
 /// Aggregated history stats for a time window.
@@ -739,12 +791,19 @@ impl HistoryDb {
         // Enable WAL mode for better concurrent performance
         self.conn.execute_batch("PRAGMA journal_mode=WAL;")?;
 
-        // Create schema version table
+        // Set busy timeout for better concurrent access (5 seconds default)
+        self.conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+
+        // Configure WAL checkpoint behavior
+        self.conn.execute_batch("PRAGMA wal_autocheckpoint=1000;")?;
+
+        // Create schema version table (includes all columns up to v3)
         self.conn.execute(
             r"CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT (datetime('now')),
-                description TEXT NOT NULL DEFAULT 'Initial schema'
+                description TEXT NOT NULL DEFAULT 'Initial schema',
+                last_prune_at TEXT
             )",
             [],
         )?;
@@ -861,9 +920,19 @@ impl HistoryDb {
             ",
         )?;
 
+        // Create stats_cache table for real-time statistics (v3 feature)
+        self.conn.execute(
+            r"CREATE TABLE IF NOT EXISTS stats_cache (
+                key TEXT PRIMARY KEY,
+                value INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
         // Record schema version
         self.conn.execute(
-            "INSERT INTO schema_version (version, description) VALUES (?1, ?2)",
+            "INSERT INTO schema_version (version, description, last_prune_at) VALUES (?1, ?2, NULL)",
             params![CURRENT_SCHEMA_VERSION, "Initial schema"],
         )?;
 
@@ -875,6 +944,9 @@ impl HistoryDb {
         // Apply migrations in order.
         if from_version < 2 {
             self.migrate_v1_to_v2()?;
+        }
+        if from_version < 3 {
+            self.migrate_v2_to_v3()?;
         }
 
         // Ensure we're at the expected version
@@ -913,6 +985,399 @@ impl HistoryDb {
         Ok(())
     }
 
+    fn migrate_v2_to_v3(&self) -> Result<(), HistoryError> {
+        // Add stats_cache table for real-time statistics
+        self.conn.execute(
+            r"CREATE TABLE IF NOT EXISTS stats_cache (
+                key TEXT PRIMARY KEY,
+                value INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        // Add last_prune_at column to schema_version for auto-prune tracking
+        // Check if column exists first
+        let columns: Vec<String> = self
+            .conn
+            .prepare("PRAGMA table_info(schema_version)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<_, _>>()?;
+
+        if !columns.iter().any(|col| col == "last_prune_at") {
+            self.conn.execute(
+                "ALTER TABLE schema_version ADD COLUMN last_prune_at TEXT",
+                [],
+            )?;
+        }
+
+        // Record migration
+        self.conn.execute(
+            "INSERT INTO schema_version (version, description) VALUES (?1, ?2)",
+            params![3_u32, "Add stats cache and auto-prune tracking"],
+        )?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Batch Operations
+    // ========================================================================
+
+    /// Log multiple command entries in a single transaction (batched insert).
+    ///
+    /// This is more efficient than calling `log_command` repeatedly for bulk inserts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction fails.
+    pub fn log_commands_batch(&self, entries: &[CommandEntry]) -> Result<(), HistoryError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+
+        for entry in entries {
+            let command_hash = entry.command_hash();
+            let timestamp = entry.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+            let eval_duration_us = i64::try_from(entry.eval_duration_us).unwrap_or(i64::MAX);
+
+            tx.execute(
+                r"INSERT INTO commands (
+                    timestamp, agent_type, working_dir, command, command_hash,
+                    outcome, pack_id, pattern_name, eval_duration_us,
+                    session_id, exit_code, parent_command_id, hostname,
+                    allowlist_layer, bypass_code
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
+                )",
+                params![
+                    timestamp,
+                    entry.agent_type,
+                    entry.working_dir,
+                    entry.command,
+                    command_hash,
+                    entry.outcome.as_str(),
+                    entry.pack_id,
+                    entry.pattern_name,
+                    eval_duration_us,
+                    entry.session_id,
+                    entry.exit_code,
+                    entry.parent_command_id,
+                    entry.hostname,
+                    entry.allowlist_layer,
+                    entry.bypass_code,
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // WAL and Checkpoint Operations
+    // ========================================================================
+
+    /// Manually checkpoint the WAL file.
+    ///
+    /// This moves committed transactions from WAL to the main database file.
+    /// Uses PASSIVE mode to avoid blocking readers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checkpoint fails.
+    pub fn checkpoint(&self) -> Result<(), HistoryError> {
+        self.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+        Ok(())
+    }
+
+    /// Checkpoint with TRUNCATE mode (resets WAL file).
+    ///
+    /// This is more aggressive and may block briefly, but reclaims disk space.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checkpoint fails.
+    pub fn checkpoint_truncate(&self) -> Result<(), HistoryError> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Auto-Prune Support
+    // ========================================================================
+
+    /// Check if automatic pruning should run based on the last prune timestamp.
+    ///
+    /// Returns true if no prune has been recorded or if the last prune was
+    /// more than 24 hours ago.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn should_auto_prune(&self) -> Result<bool, HistoryError> {
+        let result: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT last_prune_at FROM schema_version WHERE last_prune_at IS NOT NULL ORDER BY version DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+
+        result.map_or(Ok(true), |timestamp_str| {
+            chrono::DateTime::parse_from_rfc3339(&timestamp_str).map_or(
+                Ok(true), // Invalid timestamp, assume prune needed
+                |last_prune| {
+                    let hours_since_prune =
+                        (Utc::now() - last_prune.with_timezone(&Utc)).num_hours();
+                    Ok(hours_since_prune >= 24)
+                },
+            )
+        })
+    }
+
+    /// Record the current timestamp as the last prune time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the update fails.
+    pub fn record_prune_timestamp(&self) -> Result<(), HistoryError> {
+        let now = format_timestamp(Utc::now());
+        self.conn.execute(
+            "UPDATE schema_version SET last_prune_at = ?1 WHERE version = (SELECT MAX(version) FROM schema_version)",
+            [now],
+        )?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Statistics Cache
+    // ========================================================================
+
+    /// Get a cached statistic value.
+    ///
+    /// Returns None if the key doesn't exist or is stale (older than `max_age_secs`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn get_cached_stat(
+        &self,
+        key: &str,
+        max_age_secs: i64,
+    ) -> Result<Option<i64>, HistoryError> {
+        let result: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT value, updated_at FROM stats_cache WHERE key = ?1",
+                [key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+
+        match result {
+            None => Ok(None),
+            Some((value, updated_at)) => {
+                if let Ok(updated) = chrono::DateTime::parse_from_rfc3339(&updated_at) {
+                    let age_secs = (Utc::now() - updated.with_timezone(&Utc)).num_seconds();
+                    if age_secs <= max_age_secs {
+                        return Ok(Some(value));
+                    }
+                }
+                Ok(None) // Stale or invalid timestamp
+            }
+        }
+    }
+
+    /// Update a cached statistic value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the upsert fails.
+    pub fn update_cached_stat(&self, key: &str, value: i64) -> Result<(), HistoryError> {
+        let now = format_timestamp(Utc::now());
+        self.conn.execute(
+            "INSERT INTO stats_cache (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3",
+            params![key, value, now],
+        )?;
+        Ok(())
+    }
+
+    /// Increment a cached statistic value atomically.
+    ///
+    /// Creates the key with value 1 if it doesn't exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails.
+    pub fn increment_cached_stat(&self, key: &str) -> Result<(), HistoryError> {
+        let now = format_timestamp(Utc::now());
+        self.conn.execute(
+            "INSERT INTO stats_cache (key, value, updated_at) VALUES (?1, 1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = value + 1, updated_at = ?2",
+            params![key, now],
+        )?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Health Check
+    // ========================================================================
+
+    /// Perform a comprehensive database health check.
+    ///
+    /// Checks integrity, FTS sync, and reports statistics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any check query fails.
+    pub fn check_health(&self) -> Result<CheckResult, HistoryError> {
+        // Integrity check
+        let integrity_check: String = self
+            .conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        let integrity_ok = integrity_check == "ok";
+
+        // Foreign key check
+        let fk_violations: Vec<()> = self
+            .conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |_| Ok(()))?
+            .collect::<Result<_, _>>()?;
+        let foreign_key_violations = fk_violations.len();
+
+        // Commands count
+        let commands_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM commands", [], |row| row.get(0))?;
+        let commands_count = u64::try_from(commands_count).unwrap_or(0);
+
+        // FTS count
+        let fts_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM commands_fts", [], |row| row.get(0))?;
+        let fts_count = u64::try_from(fts_count).unwrap_or(0);
+
+        // Journal mode
+        let journal_mode: String = self
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+
+        // File sizes
+        let file_size_bytes = self.file_size().unwrap_or(0);
+        let wal_size_bytes = self.path.as_ref().map_or(0, |p| {
+            // SQLite WAL files are named by appending "-wal" to the database path
+            let wal_path = PathBuf::from(format!("{}-wal", p.display()));
+            std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0)
+        });
+
+        // Schema version
+        let schema_version = self.get_schema_version().unwrap_or(0);
+
+        // Page info
+        let page_size: i64 = self
+            .conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let page_count: i64 = self
+            .conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let freelist_count: i64 = self
+            .conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+
+        Ok(CheckResult {
+            integrity_check,
+            integrity_ok,
+            foreign_key_violations,
+            commands_count,
+            fts_count,
+            fts_in_sync: commands_count == fts_count,
+            journal_mode,
+            file_size_bytes,
+            wal_size_bytes,
+            schema_version,
+            page_size: u32::try_from(page_size).unwrap_or(0),
+            page_count: u64::try_from(page_count).unwrap_or(0),
+            freelist_count: u64::try_from(freelist_count).unwrap_or(0),
+        })
+    }
+
+    // ========================================================================
+    // Backup
+    // ========================================================================
+
+    /// Create a backup of the database to the specified path.
+    ///
+    /// Uses `VACUUM INTO` for a consistent backup. Optionally compresses
+    /// the output with gzip.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backup fails.
+    pub fn backup(&self, output_path: &Path, compress: bool) -> Result<BackupResult, HistoryError> {
+        use std::time::Instant;
+
+        let start = Instant::now();
+
+        // Checkpoint first to minimize WAL size
+        self.checkpoint()?;
+
+        if compress {
+            // For compression, we need to vacuum to a temp file first
+            let temp_path = output_path.with_extension("db.tmp");
+
+            // VACUUM INTO creates a clean copy
+            self.conn
+                .execute("VACUUM INTO ?1", [temp_path.to_string_lossy().as_ref()])?;
+
+            // Compress the temp file to the final path
+            let temp_file = std::fs::File::open(&temp_path)?;
+            let final_file = std::fs::File::create(output_path)?;
+            let mut encoder =
+                flate2::write::GzEncoder::new(final_file, flate2::Compression::default());
+            std::io::copy(&mut std::io::BufReader::new(temp_file), &mut encoder)?;
+            encoder.finish()?;
+
+            // Clean up temp file
+            let _ = std::fs::remove_file(&temp_path);
+        } else {
+            // Direct VACUUM INTO
+            self.conn
+                .execute("VACUUM INTO ?1", [output_path.to_string_lossy().as_ref()])?;
+        }
+
+        let backup_size_bytes = std::fs::metadata(output_path)?.len();
+        #[allow(clippy::cast_possible_truncation)]
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Verify backup integrity (quick check)
+        let verified = if compress {
+            // Skip verification for compressed backups (would need to decompress)
+            false
+        } else {
+            // Verify uncompressed backups
+            Connection::open(output_path)
+                .and_then(|conn| {
+                    conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                })
+                .map(|result| result == "ok")
+                .unwrap_or(false)
+        };
+
+        Ok(BackupResult {
+            backup_path: output_path.to_string_lossy().to_string(),
+            backup_size_bytes,
+            compressed: compress,
+            duration_ms,
+            verified,
+        })
+    }
+
     /// Access the underlying connection for advanced queries.
     ///
     /// This is primarily for testing and advanced use cases.
@@ -926,6 +1391,7 @@ impl HistoryDb {
     /// # Errors
     ///
     /// Returns an error if the query fails.
+    #[allow(clippy::redundant_closure_for_method_calls)]
     pub fn query_commands_for_export(
         &self,
         options: &ExportOptions,
@@ -965,8 +1431,7 @@ impl HistoryDb {
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
             let timestamp_str: String = row.get(0)?;
             let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
+                .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc));
 
             let outcome_str: String = row.get(4)?;
             let outcome = Outcome::parse(&outcome_str).unwrap_or(Outcome::Allow);
@@ -1025,7 +1490,7 @@ impl HistoryDb {
         };
 
         serde_json::to_writer_pretty(writer, &export)
-            .map_err(|e| HistoryError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| HistoryError::Io(std::io::Error::other(e)))?;
 
         Ok(count)
     }
@@ -1047,7 +1512,7 @@ impl HistoryDb {
 
         for entry in &entries {
             serde_json::to_writer(&mut *writer, entry)
-                .map_err(|e| HistoryError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                .map_err(|e| HistoryError::Io(std::io::Error::other(e)))?;
             writeln!(writer)?;
         }
 
@@ -1144,7 +1609,7 @@ impl HistoryDb {
         let inactive_packs: Vec<String> = enabled_packs
             .iter()
             .filter(|pack| !active_packs.contains(&pack.to_string()))
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
 
         // Find potential coverage gaps
@@ -1356,8 +1821,7 @@ impl HistoryDb {
                 if command_lower.contains(&pattern.to_lowercase()) {
                     // Parse timestamp
                     let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now());
+                        .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc));
 
                     gaps.push(PotentialGap {
                         command: command.clone(),
@@ -1409,9 +1873,8 @@ impl HistoryDb {
             recommendations.push(PackRecommendation {
                 recommendation_type: RecommendationType::DisablePack,
                 description: format!(
-                    "Pack '{}' is enabled but has not triggered any rules. \
-                     Consider disabling it to reduce overhead.",
-                    pack
+                    "Pack '{pack}' is enabled but has not triggered any rules. \
+                     Consider disabling it to reduce overhead."
                 ),
                 suggested_action: None,
                 config_change: Some(format!(
@@ -2749,8 +3212,7 @@ mod tests {
         for rec in &analysis.recommendations {
             assert!(
                 rec.suggested_action.is_some() || rec.config_change.is_some() || rec.priority <= 2,
-                "Recommendation should be actionable: {:?}",
-                rec
+                "Recommendation should be actionable: {rec:?}"
             );
         }
     }

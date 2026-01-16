@@ -433,6 +433,30 @@ pub enum HistoryAction {
         #[arg(long)]
         gaps: bool,
     },
+
+    /// Check database health and integrity
+    #[command(name = "check")]
+    Check {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Fail with non-zero exit code if integrity check fails
+        #[arg(long)]
+        strict: bool,
+    },
+
+    /// Create a backup of the history database
+    #[command(name = "backup")]
+    Backup {
+        /// Output file path for the backup
+        #[arg(value_name = "PATH")]
+        output: String,
+
+        /// Compress the backup with gzip
+        #[arg(long, short = 'z')]
+        compress: bool,
+    },
 }
 
 /// Developer tool subcommands
@@ -2963,6 +2987,12 @@ fn handle_history_command(
         } => {
             history_analyze(&db, days, json, recommendations_only, false_positives, gaps)?;
         }
+        HistoryAction::Check { json, strict } => {
+            history_check(&db, json, strict)?;
+        }
+        HistoryAction::Backup { output, compress } => {
+            history_backup(&db, &output, compress)?;
+        }
     }
 
     Ok(())
@@ -3017,6 +3047,7 @@ fn history_prune(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
 fn history_export(
     db: &HistoryDb,
     output_path: Option<String>,
@@ -3105,7 +3136,7 @@ fn export_to_writer<W: std::io::Write>(
     Ok(count)
 }
 
-#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_lines)]
 fn history_analyze(
     db: &HistoryDb,
     days: u64,
@@ -3249,6 +3280,152 @@ fn history_analyze(
     }
 
     Ok(())
+}
+
+fn history_check(
+    db: &HistoryDb,
+    json: bool,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use colored::Colorize;
+
+    let result = db.check_health()?;
+
+    if json {
+        let output = serde_json::to_string_pretty(&result)?;
+        println!("{output}");
+    } else {
+        println!(
+            "\n{}",
+            "═══ History Database Health Check ═══".bright_cyan().bold()
+        );
+
+        // Integrity status
+        let integrity_status = if result.integrity_ok {
+            "✓ PASSED".green()
+        } else {
+            "✗ FAILED".red()
+        };
+        println!(
+            "Integrity check: {} ({})",
+            integrity_status, result.integrity_check
+        );
+
+        // Foreign key check
+        if result.foreign_key_violations == 0 {
+            println!("Foreign keys: {} violations", "0".green());
+        } else {
+            println!(
+                "Foreign keys: {} violations",
+                result.foreign_key_violations.to_string().red()
+            );
+        }
+
+        // FTS sync status
+        let fts_status = if result.fts_in_sync {
+            "✓ in sync".green()
+        } else {
+            "✗ out of sync".red()
+        };
+        println!(
+            "FTS index: {} ({} commands, {} FTS entries)",
+            fts_status, result.commands_count, result.fts_count
+        );
+
+        // Storage info
+        println!("\n{}", "Storage:".bright_white());
+        println!(
+            "  Database: {} ({} pages)",
+            format_size(result.file_size_bytes),
+            result.page_count
+        );
+        println!("  WAL file: {}", format_size(result.wal_size_bytes));
+        println!(
+            "  Free pages: {} ({} bytes)",
+            result.freelist_count,
+            result.freelist_count * u64::from(result.page_size)
+        );
+
+        // Schema info
+        println!("\n{}", "Configuration:".bright_white());
+        println!("  Schema version: {}", result.schema_version);
+        println!("  Journal mode: {}", result.journal_mode);
+        println!("  Page size: {} bytes", result.page_size);
+    }
+
+    if strict && !result.integrity_ok {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+fn history_backup(
+    db: &HistoryDb,
+    output: &str,
+    compress: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use colored::Colorize;
+    use std::path::Path;
+
+    let output_path = Path::new(output);
+
+    // Add .gz extension if compressing and not already present
+    let has_gz_ext = output_path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"));
+    let final_path = if compress && !has_gz_ext {
+        output_path.with_extension(format!(
+            "{}.gz",
+            output_path
+                .extension()
+                .map(|e| e.to_string_lossy())
+                .unwrap_or_default()
+        ))
+    } else {
+        output_path.to_path_buf()
+    };
+
+    println!("Creating backup...");
+    let result = db.backup(&final_path, compress)?;
+
+    println!("\n{}", "═══ Backup Complete ═══".bright_cyan().bold());
+    println!("Output: {}", result.backup_path.bright_white());
+    println!(
+        "Size: {} {}",
+        format_size(result.backup_size_bytes),
+        if result.compressed {
+            "(compressed)"
+        } else {
+            ""
+        }
+    );
+    println!("Duration: {} ms", result.duration_ms);
+    if result.verified {
+        println!("Verification: {}", "✓ PASSED".green());
+    } else {
+        println!("Verification: {}", "skipped (compressed backup)".dimmed());
+    }
+
+    Ok(())
+}
+
+/// Format a byte size in human-readable format.
+#[allow(clippy::cast_precision_loss)]
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 fn format_history_stats_pretty(stats: &HistoryStats) -> String {
@@ -5151,7 +5328,10 @@ fn resolve_allow_once_revoke_target(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut matches: Vec<String> = Vec::new();
 
-    if target.len() <= 4 {
+    // Short codes are 5-digit numeric strings; anything else is a hash prefix
+    let is_short_code = target.len() <= 5 && target.chars().all(|c| c.is_ascii_digit());
+
+    if is_short_code {
         matches.extend(
             pending
                 .iter()

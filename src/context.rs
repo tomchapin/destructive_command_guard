@@ -263,6 +263,11 @@ impl ContextClassifier {
         let mut pending_inline_code = false;
         let mut last_word_start = 0;
 
+        // Track whether we're in "command position" - where the next word would be an executable.
+        // This is true at the start of a command, or right after a command separator (|, ||, &&, ;).
+        // Used to treat double-quoted strings at command position as Executed rather than Argument.
+        let mut in_command_position = true;
+
         let in_inline_context = |state_stack: &[TokenizerState]| {
             state_stack
                 .iter()
@@ -297,6 +302,9 @@ impl ContextClassifier {
                         b'\'' => {
                             if i > span_start {
                                 spans.push(Span::new(current_kind, span_start, i));
+                                // If we pushed content before the quote, we're past command position
+                                // (e.g., VAR='...' - VAR= is not the command, the quote is not at cmd start)
+                                in_command_position = false;
                             }
                             span_start = i;
                             stack.push(TokenizerState::SingleQuote);
@@ -316,6 +324,9 @@ impl ContextClassifier {
                             };
                             current_kind = if inline_here {
                                 SpanKind::InlineCode
+                            } else if in_command_position {
+                                // Quoted string at command position is likely an executable
+                                SpanKind::Executed
                             } else {
                                 SpanKind::Data
                             };
@@ -323,6 +334,9 @@ impl ContextClassifier {
                         b'"' => {
                             if i > span_start {
                                 spans.push(Span::new(current_kind, span_start, i));
+                                // If we pushed content before the quote, we're past command position
+                                // (e.g., VAR="..." - VAR= is not the command, the quote is not at cmd start)
+                                in_command_position = false;
                             }
                             span_start = i;
                             stack.push(TokenizerState::DoubleQuote);
@@ -342,6 +356,10 @@ impl ContextClassifier {
                             };
                             current_kind = if inline_here {
                                 SpanKind::InlineCode
+                            } else if in_command_position {
+                                // Quoted string at command position is likely an executable
+                                // (e.g., "C:/Program Files/Git/bin/git" status)
+                                SpanKind::Executed
                             } else {
                                 SpanKind::Argument
                             };
@@ -385,6 +403,8 @@ impl ContextClassifier {
                             span_start = i;
                             current_kind = SpanKind::Executed;
                             pending_inline_code = false;
+                            // After a command separator, the next word is a new command
+                            in_command_position = true;
                             continue;
                         }
                         b'#' => {
@@ -411,6 +431,10 @@ impl ContextClassifier {
                                         word,
                                     );
                                 }
+                                // After the first word, we're no longer in command position
+                                if in_command_position && !word.is_empty() {
+                                    in_command_position = false;
+                                }
                             }
                             last_word_start = i + 1;
                         }
@@ -429,6 +453,10 @@ impl ContextClassifier {
                             ) {
                                 spans.push(Span::new(current_kind, span_start, i + 1));
                                 span_start = i + 1;
+                                // If this quoted string was the command, we're no longer in command position
+                                if current_kind == SpanKind::Executed {
+                                    in_command_position = false;
+                                }
                                 current_kind = SpanKind::Executed;
                             }
                         }
@@ -473,6 +501,10 @@ impl ContextClassifier {
                         ) {
                             spans.push(Span::new(current_kind, span_start, i + 1));
                             span_start = i + 1;
+                            // If this quoted string was the command, we're no longer in command position
+                            if current_kind == SpanKind::Executed {
+                                in_command_position = false;
+                            }
                             current_kind = SpanKind::Executed;
                         }
                     }
@@ -623,7 +655,16 @@ impl ContextClassifier {
             };
 
             // Found a potential command word
-            let base_name = token_unquoted.rsplit('/').next().unwrap_or(token_unquoted);
+            // Handle both Unix (/) and Windows (\) path separators
+            let base_name = token_unquoted
+                .rsplit(&['/', '\\'][..])
+                .next()
+                .unwrap_or(token_unquoted);
+            // Strip Windows .exe extension if present
+            let base_name = base_name
+                .strip_suffix(".exe")
+                .or_else(|| base_name.strip_suffix(".EXE"))
+                .unwrap_or(base_name);
 
             // Skip wrappers that might precede the interpreter
             if matches!(base_name, "sudo" | "time" | "nohup" | "env" | "command") {
@@ -982,10 +1023,13 @@ struct PendingSafeFlag<'a> {
 #[must_use]
 #[allow(clippy::too_many_lines)] // Single-pass masking logic; refactor only if it becomes unreadable
 pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
-    // Quick-reject: if no safe-registry commands appear in the input, no masking
-    // is possible. Skip expensive tokenization entirely. This is a significant
+    // Quick-reject: if no safe-registry commands appear in the input AND no comments,
+    // no masking is possible. Skip expensive tokenization entirely. This is a significant
     // optimization for heredocs and other large inputs that don't use these commands.
-    if !SAFE_COMMANDS_MATCHER.is_match(command) {
+    // Note: We must still process commands with `#` to mask comments, even if no safe
+    // commands are present (e.g., `python -c '...' # rm -rf /` should mask the comment).
+    let has_comment_char = command.contains('#');
+    if !SAFE_COMMANDS_MATCHER.is_match(command) && !has_comment_char {
         return Cow::Borrowed(command);
     }
 
