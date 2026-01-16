@@ -1230,7 +1230,8 @@ pub fn normalize_command_word_token(token: &str) -> Option<String> {
                     result.push(inner);
                 }
                 if !found_close {
-                    // Unclosed quote - put quote back and break
+                    // Unclosed quote - put quote back (but local_changed stays false,
+                    // so we won't use this partial result)
                     result.push(quote);
                 }
             } else {
