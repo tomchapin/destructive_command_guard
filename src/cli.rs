@@ -3171,7 +3171,9 @@ fn history_analyze(
         } else {
             println!(
                 "{}",
-                "⚠️  Potentially Aggressive Patterns (high bypass rate):".yellow().bold()
+                "⚠️  Potentially Aggressive Patterns (high bypass rate):"
+                    .yellow()
+                    .bold()
             );
             for p in &analysis.potentially_aggressive {
                 println!(
@@ -3190,14 +3192,13 @@ fn history_analyze(
     // Show coverage gaps
     if gaps || (!recommendations_only && !false_positives) {
         if analysis.potential_gaps.is_empty() {
-            println!(
-                "{}",
-                "✓ No potential coverage gaps detected.".green()
-            );
+            println!("{}", "✓ No potential coverage gaps detected.".green());
         } else {
             println!(
                 "{}",
-                "⚠️  Potential Coverage Gaps (dangerous commands that were allowed):".yellow().bold()
+                "⚠️  Potential Coverage Gaps (dangerous commands that were allowed):"
+                    .yellow()
+                    .bold()
             );
             for gap in analysis.potential_gaps.iter().take(10) {
                 let cmd_display = if gap.command.len() > 60 {
@@ -3212,10 +3213,7 @@ fn history_analyze(
                 );
             }
             if analysis.potential_gaps.len() > 10 {
-                println!(
-                    "  ... and {} more",
-                    analysis.potential_gaps.len() - 10
-                );
+                println!("  ... and {} more", analysis.potential_gaps.len() - 10);
             }
             println!();
         }

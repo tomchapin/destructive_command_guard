@@ -21,10 +21,10 @@
 //! ```
 
 use aho_corasick::AhoCorasick;
-use std::sync::LazyLock;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::LazyLock;
 
 /// Classification of a command-line span.
 ///

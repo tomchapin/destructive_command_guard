@@ -2452,7 +2452,8 @@ mod tests {
         let db = create_test_db_with_data(50);
         let mut buf = Vec::new();
 
-        db.export_jsonl(&mut buf, &ExportOptions::default()).unwrap();
+        db.export_jsonl(&mut buf, &ExportOptions::default())
+            .unwrap();
 
         let content = String::from_utf8(buf).unwrap();
         // Each line should be valid JSON
@@ -2534,9 +2535,7 @@ mod tests {
         let db = HistoryDb::open_in_memory().unwrap();
         let mut buf = Vec::new();
 
-        let count = db
-            .export_json(&mut buf, &ExportOptions::default())
-            .unwrap();
+        let count = db.export_json(&mut buf, &ExportOptions::default()).unwrap();
 
         assert_eq!(count, 0);
         let json: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -2702,9 +2701,7 @@ mod tests {
         }
         insert_analysis_entry(&db, "pattern-b", "core.git", Outcome::Bypass, now);
 
-        let analysis = db
-            .analyze_pack_effectiveness(30, &["core.git"])
-            .unwrap();
+        let analysis = db.analyze_pack_effectiveness(30, &["core.git"]).unwrap();
 
         // Pattern A should be high value (high volume, low bypass)
         assert!(
